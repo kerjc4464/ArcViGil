@@ -34,11 +34,11 @@ ArcViGil 将会话中的约定带到离线之后——后端会按 AI 角色指�
 - 已安装 **Python 3.8 或更高版本**（[官网下载](https://www.python.org/downloads/)，安装时勾选"Add to PATH"）
 
 ### 1. 安装前端插件
-将本仓库整个文件夹放入：
+在 SillyTavern 扩展面板中点击「安装扩展」，粘贴本仓库地址：
 ```
-SillyTavern/public/scripts/extensions/third-party/ArcViGil
+https://github.com/kerjc4464/ArcViGil
 ```
-重启 SillyTavern，在扩展列表中启用 ArcViGil。
+点确定，ST 会自动克隆到 `third-party/` 目录。安装后刷新页面，在扩展列表中启用 ArcViGil。
 
 ### 2. 启动后端
 进入 `ArcViGil-BackEnd` 目录，**双击 `start.bat`**。
