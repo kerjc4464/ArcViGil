@@ -119,5 +119,16 @@ souls/
 ---
 
 <div align="center">
+
+*I'm Here, Always Online.*
+*They're Here, Always Online.*
+*Everyone's Here, Always Online.*
+
+*The Next Generation Of Arc,*
+*A Small Step Forward.*
+
+---
+
 Made by Antigravity & Reality
+
 </div>
