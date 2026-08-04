@@ -1,0 +1,566 @@
+/* ===== 基础容器 ===== */
+.arcvigil-container {
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+}
+
+/* ===== 发送模式 Tab ===== */
+.arcvigil-mode-tabs {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.arcvigil-mode-tab {
+    flex: 1;
+    min-width: 120px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid rgba(255,255,255,0.1);
+    background: rgba(0,0,0,0.2);
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: bold;
+    transition: all 0.2s;
+    color: var(--grey_text);
+}
+
+.arcvigil-mode-tab:hover {
+    border-color: rgba(167,139,250,0.4);
+    color: var(--SmartThemeBodyColor);
+}
+
+.arcvigil-mode-tab.active {
+    background: rgba(167,139,250,0.15);
+    border-color: rgba(167,139,250,0.7);
+    color: #c4b5fd;
+    box-shadow: 0 0 10px rgba(167,139,250,0.2);
+}
+
+.arcvigil-mode-badge {
+    font-size: 10px;
+    font-weight: normal;
+    opacity: 0.7;
+    font-style: italic;
+}
+
+/* ===== Resend 提示框 ===== */
+.arcvigil-resend-info {
+    background: rgba(167,139,250,0.08);
+    border: 1px solid rgba(167,139,250,0.3);
+    border-radius: 6px;
+    padding: 10px 12px;
+    font-size: 12px;
+    color: var(--grey_text);
+    line-height: 1.7;
+}
+
+.arcvigil-resend-info i {
+    color: #a78bfa;
+    margin-right: 4px;
+}
+
+
+
+/* ===== 状态头部 ===== */
+.arcvigil-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--SmartThemeBorderColor);
+    padding-bottom: 10px;
+}
+
+.arcvigil-header h3 {
+    margin: 0;
+    color: var(--SmartThemeQuoteColor);
+}
+
+/* ===== 状态指示灯 ===== */
+.status-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    transition: background-color 0.3s, box-shadow 0.3s;
+}
+
+.status-dot.offline {
+    background-color: #ff4444;
+    box-shadow: 0 0 6px #ff4444;
+}
+
+.status-dot.online {
+    background-color: #44ff88;
+    box-shadow: 0 0 10px #44ff88;
+    animation: pulse-online 2s infinite;
+}
+
+@keyframes pulse-online {
+    0%, 100% { box-shadow: 0 0 6px #44ff88; }
+    50%       { box-shadow: 0 0 14px #44ff88; }
+}
+
+/* ===== 通用区块 ===== */
+.arcvigil-section {
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 8px;
+    padding: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.arcvigil-section h4 {
+    margin-top: 0;
+    margin-bottom: 12px;
+    color: var(--grey_text);
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+/* ===== 表单组 ===== */
+.arcvigil-form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    margin-bottom: 10px;
+}
+
+.arcvigil-form-group label {
+    font-size: 12px;
+    color: var(--grey_text);
+}
+
+/* ===== 按钮行 ===== */
+.arcvigil-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.arcvigil-actions .menu_button {
+    flex: 1;
+    text-align: center;
+    justify-content: center;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+/* ===== LLM 参数网格 ===== */
+.arcvigil-params-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.arcvigil-param-hint {
+    display: block;
+    font-size: 10px;
+    color: var(--grey_text);
+    opacity: 0.6;
+    font-style: italic;
+    margin-top: 1px;
+}
+
+/* 滑块+数字输入行 */
+.arcvigil-slider-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.arcvigil-slider {
+    flex: 1;
+    accent-color: #a78bfa;
+    cursor: pointer;
+    height: 4px;
+}
+
+.arcvigil-num-input {
+    width: 70px !important;
+    flex-shrink: 0;
+    text-align: center;
+    font-size: 12px;
+    padding: 2px 4px !important;
+}
+
+/* ===== 提示词编辑器 ===== */
+.arcvigil-prompt-hints {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 10px;
+    font-size: 11px;
+    color: var(--grey_text);
+}
+
+.arcvigil-tag {
+    background: rgba(167, 139, 250, 0.2);
+    border: 1px solid rgba(167, 139, 250, 0.5);
+    color: #c4b5fd;
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-family: monospace;
+    font-size: 11px;
+}
+
+.arcvigil-prompt-editor {
+    width: 100%;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 6px;
+    color: var(--SmartThemeBodyColor);
+    font-size: 12px;
+    font-family: monospace;
+    line-height: 1.5;
+    padding: 8px;
+    resize: vertical;
+    box-sizing: border-box;
+    transition: border-color 0.2s;
+}
+
+.arcvigil-prompt-editor:focus {
+    outline: none;
+    border-color: rgba(167, 139, 250, 0.6);
+}
+
+/* ===== Soul 注册中心 ===== */
+.arcvigil-hint-text {
+    font-size: 11px;
+    color: var(--grey_text);
+    opacity: 0.75;
+    margin: 0 0 10px;
+    line-height: 1.6;
+}
+
+.arcvigil-hint-text code {
+    background: rgba(255,255,255,0.1);
+    padding: 1px 4px;
+    border-radius: 3px;
+    font-family: monospace;
+    font-size: 11px;
+}
+
+.arcvigil-soul-list {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    max-height: 180px;
+    overflow-y: auto;
+}
+
+.arcvigil-soul-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: rgba(255, 255, 255, 0.05);
+    padding: 7px 10px;
+    border-radius: 6px;
+    border-left: 3px solid #34d399;
+    font-size: 12px;
+}
+
+.arcvigil-soul-item .soul-name {
+    font-weight: bold;
+    color: #e2c08d;
+    flex: 1;
+}
+
+.arcvigil-soul-item .soul-format-badge {
+    background: rgba(52, 211, 153, 0.2);
+    border: 1px solid rgba(52, 211, 153, 0.4);
+    color: #34d399;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-family: monospace;
+    font-weight: bold;
+}
+
+.arcvigil-soul-item .soul-size {
+    color: var(--grey_text);
+    font-size: 10px;
+    opacity: 0.6;
+}
+
+/* ===== 任务雷达 ===== */
+.arcvigil-task-list {
+    max-height: 200px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.arcvigil-task-item {
+    background: rgba(255, 255, 255, 0.05);
+    padding: 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    border-left: 3px solid #a78bfa;
+}
+
+.arcvigil-task-item .task-title {
+    font-weight: bold;
+    color: #e2c08d;
+    margin-bottom: 4px;
+}
+
+.arcvigil-task-item .task-meta {
+    color: var(--grey_text);
+    font-size: 11px;
+}
+
+/* ===== 通用空状态 ===== */
+.arcvigil-empty-msg {
+    color: var(--grey_text);
+    font-style: italic;
+    text-align: center;
+    padding: 12px;
+    opacity: 0.6;
+}
+
+/* ===== 信件存档 ===== */
+.arcvigil-letter-archive {
+    margin-top: 12px;
+    border: 1px solid rgba(167, 139, 250, 0.2);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.arcvigil-letter-archive-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    background: rgba(167, 139, 250, 0.08);
+    font-size: 12px;
+    font-weight: bold;
+    color: #c4b5fd;
+    border-bottom: 1px solid rgba(167, 139, 250, 0.2);
+}
+
+.arcvigil-icon-btn {
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    cursor: pointer;
+    color: var(--grey_text);
+    transition: all 0.2s;
+}
+
+.arcvigil-icon-btn:hover {
+    background: rgba(167, 139, 250, 0.2);
+    color: #c4b5fd;
+}
+
+.arcvigil-icon-btn.spinning i {
+    animation: spin 0.6s linear infinite;
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+}
+
+#arcvigil-letter-list {
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+/* 信件条目 */
+.arcvigil-letter-item {
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    transition: background 0.15s;
+}
+
+.arcvigil-letter-item:last-child {
+    border-bottom: none;
+}
+
+.arcvigil-letter-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 12px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.arcvigil-letter-header:hover {
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.arcvigil-letter-chevron {
+    color: var(--grey_text);
+    opacity: 0.5;
+    font-size: 10px;
+    transition: transform 0.2s;
+    flex-shrink: 0;
+}
+
+.arcvigil-letter-item.open .arcvigil-letter-chevron {
+    transform: rotate(90deg);
+}
+
+.arcvigil-letter-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #a78bfa;
+    flex-shrink: 0;
+}
+
+.arcvigil-letter-meta {
+    flex: 1;
+    min-width: 0;
+}
+
+.arcvigil-letter-subject {
+    font-size: 12px;
+    font-weight: bold;
+    color: #e2c08d;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.arcvigil-letter-time {
+    font-size: 10px;
+    color: var(--grey_text);
+    opacity: 0.65;
+    margin-top: 2px;
+}
+
+.arcvigil-letter-injected-badge {
+    font-size: 9px;
+    background: rgba(52, 211, 153, 0.15);
+    border: 1px solid rgba(52, 211, 153, 0.35);
+    color: #34d399;
+    padding: 1px 6px;
+    border-radius: 3px;
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+
+.arcvigil-letter-injected-badge.not-injected {
+    background: rgba(107, 114, 128, 0.15);
+    border-color: rgba(107, 114, 128, 0.3);
+    color: var(--grey_text);
+}
+
+/* 展开内容区 */
+.arcvigil-letter-body {
+    display: none;
+    padding: 0 12px 12px 12px;
+}
+
+.arcvigil-letter-item.open .arcvigil-letter-body {
+    display: block;
+}
+
+.arcvigil-letter-content-box {
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    padding: 10px 12px;
+    font-size: 12px;
+    line-height: 1.7;
+    color: var(--SmartThemeBodyColor);
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 240px;
+    overflow-y: auto;
+    font-family: inherit;
+}
+
+.arcvigil-letter-summary {
+    background: rgba(52, 211, 153, 0.12);
+    border: 1px solid rgba(52, 211, 153, 0.25);
+    border-radius: 6px;
+    padding: 8px 10px;
+    margin-bottom: 8px;
+    font-size: 12px;
+    line-height: 1.6;
+    color: #a7f3d0;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+/* ===== LLM 连接测试行 ===== */
+.arcvigil-llm-test-row {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+#arcvigil-test-llm-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    white-space: nowrap;
+    padding: 8px 12px;
+    font-size: 12px;
+    cursor: pointer;
+    width: 100%;
+    box-sizing: border-box;
+    text-align: center;
+}
+
+.arcvigil-llm-test-result {
+    font-size: 11px;
+    border-radius: 5px;
+    padding: 6px 10px;
+    min-height: 28px;
+    display: none;
+    align-items: center;
+    gap: 6px;
+    background: rgba(0,0,0,0.2);
+    border: 1px solid rgba(255,255,255,0.08);
+    color: var(--grey_text);
+    word-break: break-all;
+    line-height: 1.5;
+    transition: border-color 0.2s, background 0.2s;
+}
+
+.arcvigil-llm-test-result.success {
+    background: rgba(52, 211, 153, 0.08);
+    border-color: rgba(52, 211, 153, 0.35);
+    color: #34d399;
+}
+
+.arcvigil-llm-test-result.error {
+    background: rgba(239, 68, 68, 0.08);
+    border-color: rgba(239, 68, 68, 0.35);
+    color: #f87171;
+}
+
+/* 摘要 LLM 来源 radio 按钮 */
+.arcvigil-radio-group {
+    display: flex;
+    gap: 20px;
+    margin-top: 4px;
+}
+
+.arcvigil-radio-group label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--SmartThemeBodyColor);
+}

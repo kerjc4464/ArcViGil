@@ -1,0 +1,389 @@
+<div id="arcvigil-settings-container" class="inline-drawer">
+    <div class="inline-drawer-toggle inline-drawer-header">
+        <b>ArcViGil - I'm Here,Always Online</b>
+        <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+    </div>
+    <div class="inline-drawer-content">
+        <div class="arcvigil-container">
+
+            <!-- ===== 状态头部 ===== -->
+            <div class="arcvigil-header">
+                <h3>ArcViGil</h3>
+                <div style="display:flex; align-items:center; gap:6px;">
+                    <span id="arcvigil-status-text" style="font-size:12px; font-weight:bold; color:#ff4444;">Offline</span>
+                    <div id="arcvigil-status-indicator" class="status-dot offline" title="未连接"></div>
+                </div>
+            </div>
+
+            <!-- ===== 1. 后端 & LLM 基础配置 ===== -->
+            <div class="arcvigil-section">
+                <h4><i class="fa-solid fa-server"></i> 独立后端配置</h4>
+                <div class="arcvigil-form-group">
+                    <label for="arcvigil-backend-url">后端地址 (默认: http://127.0.0.1:9000)</label>
+                    <input type="text" id="arcvigil-backend-url" class="text_pole" placeholder="http://127.0.0.1:9000" />
+                </div>
+                <div class="arcvigil-form-group">
+                    <label for="arcvigil-api-key">LLM API Key (供后端使用)</label>
+                    <input type="password" id="arcvigil-api-key" class="text_pole" placeholder="sk-..." />
+                </div>
+                <div class="arcvigil-form-group">
+                    <label for="arcvigil-api-url">LLM API Base URL</label>
+                    <input type="text" id="arcvigil-api-url" class="text_pole" placeholder="https://api.openai.com/v1" />
+                </div>
+                <div class="arcvigil-form-group">
+                    <label for="arcvigil-api-model">LLM 模型名称</label>
+                    <input type="text" id="arcvigil-api-model" class="text_pole" placeholder="gpt-4o" />
+                </div>
+                <!-- LLM API 连通性测试 -->
+                <div class="arcvigil-llm-test-row">
+                    <div id="arcvigil-test-llm-btn" class="menu_button">
+                        <i class="fa-solid fa-plug-circle-check"></i> 测试 LLM 连接
+                    </div>
+                    <div id="arcvigil-llm-test-result" class="arcvigil-llm-test-result"></div>
+                </div>
+            </div>
+
+            <!-- ===== 2. LLM 生成参数 ===== -->
+            <div class="arcvigil-section">
+                <h4><i class="fa-solid fa-sliders"></i> LLM 生成参数</h4>
+                <div class="arcvigil-params-grid">
+                    <div class="arcvigil-form-group">
+                        <label for="arcvigil-temperature">
+                            温度 (Temperature)
+                            <span class="arcvigil-param-hint">0.0 – 2.0，越高越随机</span>
+                        </label>
+                        <div class="arcvigil-slider-row">
+                            <input type="range" id="arcvigil-temperature-slider" min="0" max="2" step="0.05" value="0.7" class="arcvigil-slider" />
+                            <input type="number" id="arcvigil-temperature" class="text_pole arcvigil-num-input" min="0" max="2" step="0.05" value="0.7" />
+                        </div>
+                    </div>
+                    <div class="arcvigil-form-group">
+                        <label for="arcvigil-top-p">
+                            Top-P (核采样)
+                            <span class="arcvigil-param-hint">0.0 – 1.0，建议与 Temperature 二选一调节</span>
+                        </label>
+                        <div class="arcvigil-slider-row">
+                            <input type="range" id="arcvigil-top-p-slider" min="0" max="1" step="0.01" value="1" class="arcvigil-slider" />
+                            <input type="number" id="arcvigil-top-p" class="text_pole arcvigil-num-input" min="0" max="1" step="0.01" value="1" />
+                        </div>
+                    </div>
+                    <div class="arcvigil-form-group">
+                        <label for="arcvigil-top-k">
+                            Top-K
+                            <span class="arcvigil-param-hint">0 = 禁用，本地推理模型(Ollama/KoboldCPP)有效</span>
+                        </label>
+                        <div class="arcvigil-slider-row">
+                            <input type="range" id="arcvigil-top-k-slider" min="0" max="100" step="1" value="0" class="arcvigil-slider" />
+                            <input type="number" id="arcvigil-top-k" class="text_pole arcvigil-num-input" min="0" max="100" step="1" value="0" />
+                        </div>
+                    </div>
+                    <div class="arcvigil-form-group">
+                        <label for="arcvigil-max-tokens">
+                            最大 Token 数 (Max Tokens)
+                            <span class="arcvigil-param-hint">256 – 16384，控制生成信件的最大长度</span>
+                        </label>
+                        <div class="arcvigil-slider-row">
+                            <input type="range" id="arcvigil-max-tokens-slider" min="256" max="16384" step="64" value="1024" class="arcvigil-slider" />
+                            <input type="number" id="arcvigil-max-tokens" class="text_pole arcvigil-num-input" min="256" max="16384" step="64" value="1024" />
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ===== 3. 现实投递配置 ===== -->
+            <div class="arcvigil-section">
+                <h4><i class="fa-solid fa-envelope"></i> 现实投递配置</h4>
+
+                <!-- 发送模式选择 -->
+                <div class="arcvigil-form-group">
+                    <label>发送模式</label>
+                    <div class="arcvigil-mode-tabs">
+                        <div id="arcvigil-mode-tab-resend" class="arcvigil-mode-tab active" data-mode="resend">
+                            <i class="fa-solid fa-bolt"></i> Resend API
+                            <span class="arcvigil-mode-badge">推荐 · 绕过端口封锁</span>
+                        </div>
+                        <div id="arcvigil-mode-tab-smtp" class="arcvigil-mode-tab" data-mode="smtp">
+                            <i class="fa-solid fa-server"></i> SMTP
+                            <span class="arcvigil-mode-badge">传统 · 需端口畅通</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Resend 配置 -->
+                <div id="arcvigil-panel-resend">
+                    <div class="arcvigil-resend-info">
+                        <i class="fa-solid fa-circle-info"></i>
+                        Resend 通过 HTTPS (443端口) 发信，<strong>完全绕过防火墙对 SMTP 端口的封锁</strong>。
+                        免费额度 3000封/月。
+                        <a href="https://resend.com" target="_blank" style="color:#a78bfa;">前往 resend.com 注册 →</a>
+                    </div>
+                    <div class="arcvigil-form-group" style="margin-top:10px;">
+                        <label for="arcvigil-resend-api-key">Resend API Key</label>
+                        <input type="password" id="arcvigil-resend-api-key" class="text_pole" placeholder="re_xxxxxxxxxxxxxxxx" />
+                    </div>
+                    <div class="arcvigil-form-group">
+                        <label for="arcvigil-resend-from">
+                            发件人地址
+                            <span class="arcvigil-param-hint">免费账号只能用 onboarding@resend.dev，绑定自有域名后可自定义</span>
+                        </label>
+                        <input type="text" id="arcvigil-resend-from" class="text_pole" placeholder="ArcViGil &lt;onboarding@resend.dev&gt;" />
+                    </div>
+                    <div class="arcvigil-form-group">
+                        <label for="arcvigil-target-email-resend">目标收件邮箱</label>
+                        <input type="text" id="arcvigil-target-email-resend" class="text_pole" placeholder="you@example.com" />
+                    </div>
+                </div>
+
+                <!-- SMTP 配置 -->
+                <div id="arcvigil-panel-smtp" style="display:none;">
+                    <div class="arcvigil-form-group" style="margin-top:10px;">
+                        <label for="arcvigil-smtp-server">SMTP 服务器 (如: smtp.qq.com)</label>
+                        <input type="text" id="arcvigil-smtp-server" class="text_pole" />
+                    </div>
+                    <div class="arcvigil-form-group">
+                        <label for="arcvigil-smtp-port">SMTP 端口 (如: 465)</label>
+                        <input type="number" id="arcvigil-smtp-port" class="text_pole" value="465" />
+                    </div>
+                    <div class="arcvigil-form-group">
+                        <label for="arcvigil-smtp-user">发件人账号</label>
+                        <input type="text" id="arcvigil-smtp-user" class="text_pole" placeholder="example@qq.com" />
+                    </div>
+                    <div class="arcvigil-form-group">
+                        <label for="arcvigil-smtp-pass">SMTP 授权码</label>
+                        <input type="password" id="arcvigil-smtp-pass" class="text_pole" placeholder="xxxx" />
+                    </div>
+                    <div class="arcvigil-form-group">
+                        <label for="arcvigil-target-email">目标收件邮箱</label>
+                        <input type="text" id="arcvigil-target-email" class="text_pole" placeholder="you@example.com" />
+                    </div>
+                </div>
+
+                <div class="arcvigil-actions" style="margin-top: 10px;">
+                    <div id="arcvigil-test-email-btn" class="menu_button">
+                        <i class="fa-solid fa-paper-plane"></i> 发送测试邮件
+                    </div>
+                </div>
+            </div>
+
+
+            <!-- ===== 4. 主模型调度系统提示词 ===== -->
+            <div class="arcvigil-section">
+                <h4><i class="fa-solid fa-microchip"></i> 调度任务系统提示词 (注入到对话尾部)</h4>
+                <div class="arcvigil-form-group">
+                    <textarea id="arcvigil-system-prompt" class="arcvigil-prompt-editor" rows="10"></textarea>
+                </div>
+                <div class="arcvigil-actions">
+                    <div id="arcvigil-sysprompt-reset-btn" class="menu_button" title="恢复内置默认提示词">
+                        <i class="fa-solid fa-rotate-left"></i> 恢复默认
+                    </div>
+                </div>
+            </div>
+
+            <!-- ===== 4b. 离线信件回归注入设置 ===== -->
+            <div class="arcvigil-section">
+                <h4><i class="fa-solid fa-envelope-open-text"></i> 信件回归注入设置</h4>
+                <p class="arcvigil-hint-text">
+                    当你返回对话，这里的设置决定如何把离线期间发出的信件融入 AI 的记忆中。
+                    信件内容持久保存在后端数据库，刷页不丢失。
+                </p>
+                <div class="flex-container alignitemscenter" style="margin-bottom: 10px;">
+                    <label class="checkbox_label">
+                        <input type="checkbox" id="arcvigil-inject-enabled" checked />
+                        <span>启用历史信件注入 (关闭后发信系统仍正常运行)</span>
+                    </label>
+                </div>
+                <div class="arcvigil-params-grid">
+                    <div class="arcvigil-form-group">
+                        <label for="arcvigil-max-inject">
+                            最多注入信件数
+                            <span class="arcvigil-param-hint">只保留最近 N 封，避免旧信不断占用 Token</span>
+                        </label>
+                        <input type="number" id="arcvigil-max-inject" class="text_pole" value="5" min="1" max="50" />
+                    </div>
+                    <div class="arcvigil-form-group">
+                        <label for="arcvigil-inject-depth">
+                            注入深度 (Depth)
+                            <span class="arcvigil-param-hint">0 = 对话顶部；输入 N 则插入到倒数 N 条消息前</span>
+                        </label>
+                        <input type="number" id="arcvigil-inject-depth" class="text_pole" value="0" min="0" />
+                    </div>
+                </div>
+                <div class="arcvigil-form-group">
+                    <label for="arcvigil-inject-position">注入位置</label>
+                    <select id="arcvigil-inject-position" class="text_pole">
+                        <option value="0">对话顶部 (Before Character Defs)</option>
+                        <option value="1">角色定义之后 (After Character Defs)</option>
+                        <option value="2">对话底部 / 最后 (At Chat Bottom)</option>
+                    </select>
+                </div>
+
+                <div class="arcvigil-form-group">
+                    <label for="arcvigil-inject-mode">注入内容模式</label>
+                    <select id="arcvigil-inject-mode" class="text_pole">
+                        <option value="full">完整正文</option>
+                        <option value="summary">摘要</option>
+                        <option value="title">仅标题</option>
+                    </select>
+                </div>
+
+                <hr style="border-color:#3a3a5e; margin: 12px 0;">
+
+                <!-- 摘要生成设置 -->
+                <div class="flex-container alignitemscenter" style="margin-bottom: 6px;">
+                    <label class="checkbox_label">
+                        <input type="checkbox" id="arcvigil-summary-enabled" checked />
+                        <span>自动生成邮件摘要 (scheduler 生成正文时同步产出70-100字摘要)</span>
+                    </label>
+                </div>
+                <div id="arcvigil-summary-panel" style="margin-left: 10px;">
+                    <div class="arcvigil-form-group">
+                        <label>摘要 LLM 来源</label>
+                        <div class="arcvigil-radio-group">
+                            <label>
+                                <input type="radio" name="arcvigil-summary-llm" id="arcvigil-summary-use-main-llm" checked />
+                                <span>复用主 LLM</span>
+                            </label>
+                            <label>
+                                <input type="radio" name="arcvigil-summary-llm" id="arcvigil-summary-custom-llm" />
+                                <span>自定义 API</span>
+                            </label>
+                        </div>
+                    </div>
+                    <div id="arcvigil-summary-custom-panel" style="display:none; margin-top: 8px;">
+                        <div class="arcvigil-form-group">
+                            <label for="arcvigil-summary-api-url">API Base URL</label>
+                            <input type="text" id="arcvigil-summary-api-url" class="text_pole" placeholder="https://api.openai.com/v1" />
+                        </div>
+                        <div class="arcvigil-form-group">
+                            <label for="arcvigil-summary-api-key">API Key</label>
+                            <input type="password" id="arcvigil-summary-api-key" class="text_pole" placeholder="sk-..." />
+                        </div>
+                        <div class="arcvigil-form-group">
+                            <label for="arcvigil-summary-api-model">模型</label>
+                            <input type="text" id="arcvigil-summary-api-model" class="text_pole" value="gpt-4o-mini" />
+                        </div>
+                        <div class="arcvigil-params-grid">
+                            <div class="arcvigil-form-group">
+                                <label for="arcvigil-summary-temperature">温度 (Temperature)</label>
+                                <input type="number" id="arcvigil-summary-temperature" class="text_pole" value="0.5" min="0" max="2" step="0.1" />
+                            </div>
+                            <div class="arcvigil-form-group">
+                                <label for="arcvigil-summary-max-tokens">最大 Token</label>
+                                <input type="number" id="arcvigil-summary-max-tokens" class="text_pole" value="200" min="64" max="1024" />
+                            </div>
+                        </div>
+                        <div class="arcvigil-form-group">
+                            <label for="arcvigil-summary-prompt-template">
+                                摘要提示词模板
+                                <span class="arcvigil-param-hint">使用 {participants} 和 {content} 占位符；留空使用内置默认</span>
+                            </label>
+                            <textarea id="arcvigil-summary-prompt-template" class="text_pole" rows="3" placeholder="留空使用内置默认..."></textarea>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 信件存档列表 -->
+                <div class="arcvigil-letter-archive">
+                    <div class="arcvigil-letter-archive-header">
+                        <span><i class="fa-solid fa-inbox"></i> 信件存档</span>
+                        <div id="arcvigil-letters-refresh-btn" class="arcvigil-icon-btn" title="刷新信件列表">
+                            <i class="fa-solid fa-arrows-rotate"></i>
+                        </div>
+                    </div>
+                    <div id="arcvigil-letter-list">
+                        <div class="arcvigil-empty-msg">点击刷新查看历史信件</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ===== 5. 信件生成提示词模板 ===== -->
+            <div class="arcvigil-section">
+                <h4><i class="fa-solid fa-file-pen"></i> 信件生成提示词模板</h4>
+                <div class="arcvigil-prompt-hints">
+                    <span class="arcvigil-tag">{souls}</span> 角色设定
+                    <span class="arcvigil-tag">{chat_context_past}</span> 决定发信时的对话（冻结）
+                    <span class="arcvigil-tag">{topic}</span> 发信主题
+                    <span class="arcvigil-tag">{chat_context_now_block}</span> 最新对话区块（关闭同步时整块为空）
+                    <span class="arcvigil-tag">{chat_context}</span> 最新对话（兼容旧模板的别名）
+                </div>
+                <div class="arcvigil-form-group">
+                    <textarea id="arcvigil-prompt-template" class="arcvigil-prompt-editor" rows="10"
+                        placeholder="留空则使用内置默认提示词…"></textarea>
+                </div>
+                <div class="arcvigil-actions">
+                    <div id="arcvigil-prompt-reset-btn" class="menu_button" title="恢复内置默认提示词">
+                        <i class="fa-solid fa-rotate-left"></i> 恢复默认
+                    </div>
+                </div>
+            </div>
+
+            <!-- ===== 6. Soul 注册中心 ===== -->
+            <div class="arcvigil-section">
+                <h4><i class="fa-solid fa-address-card"></i> Soul 注册中心</h4>
+                <p class="arcvigil-hint-text">
+                    将角色设定文件放入后端 <code>ArcViGil-BackEnd/souls/</code> 目录下，
+                    文件名即角色名（如 <code>夏目.json</code>）。
+                    支持 json / yaml / md / txt 格式。
+                </p>
+                <div id="arcvigil-soul-list" class="arcvigil-soul-list">
+                    <div class="arcvigil-empty-msg">点击"刷新"查看已注册角色</div>
+                </div>
+                <div class="arcvigil-actions" style="margin-top: 8px;">
+                    <div id="arcvigil-soul-refresh-btn" class="menu_button">
+                        <i class="fa-solid fa-arrows-rotate"></i> 刷新角色列表
+                    </div>
+                </div>
+            </div>
+
+            <!-- ===== 6. 行为设置 & 操作按钮 ===== -->
+            <div class="arcvigil-section">
+                <h4><i class="fa-solid fa-gear"></i> 行为设置</h4>
+                <div class="arcvigil-params-grid">
+                    <div class="arcvigil-form-group">
+                        <label for="arcvigil-context-depth-past">
+                            History(past) 窗口条数
+                            <span class="arcvigil-param-hint">决定发信时携带的聊天记录条数（冻结，记录发信动机）</span>
+                        </label>
+                        <input type="number" id="arcvigil-context-depth-past" class="text_pole" value="20" min="1" max="100" />
+                    </div>
+                    <div class="arcvigil-form-group">
+                        <label for="arcvigil-context-depth-now">
+                            History(now) 同步窗口条数
+                            <span class="arcvigil-param-hint">动态同步时携带的聊天记录条数（滑动窗口，随聊天推进更新）</span>
+                        </label>
+                        <input type="number" id="arcvigil-context-depth-now" class="text_pole" value="20" min="1" max="100" />
+                    </div>
+                </div>
+                <div class="flex-container alignitemscenter">
+                    <label class="checkbox_label">
+                        <input type="checkbox" id="arcvigil-enable" checked />
+                        <span>启用 ArcViGil (允许角色内联下达发信计划)</span>
+                    </label>
+                </div>
+                <div class="flex-container alignitemscenter" style="margin-top: 8px;">
+                    <label class="checkbox_label">
+                        <input type="checkbox" id="arcvigil-auto-sync-context" />
+                        <span>🔄 动态同步 History(now) 到待执行任务（总开关：关闭后不再更新，发信时也不注入最新聊天记录，只基于 设定+发信动机+主题 生成）</span>
+                    </label>
+                </div>
+                <div class="arcvigil-actions" style="margin-top: 10px;">
+                    <div id="arcvigil-save-btn" class="menu_button">
+                        <i class="fa-solid fa-floppy-disk"></i> 保存配置到后端
+                    </div>
+                    <div id="arcvigil-sync-btn" class="menu_button">
+                        <i class="fa-solid fa-inbox"></i> 拉取待收邮件
+                    </div>
+                </div>
+            </div>
+
+            <!-- ===== 7. 任务雷达 ===== -->
+            <div class="arcvigil-section">
+                <h4><i class="fa-solid fa-list-check"></i> 任务雷达 (等待中任务)</h4>
+                <div id="arcvigil-task-list" class="arcvigil-task-list">
+                    <div class="arcvigil-empty-msg">暂无计划任务</div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+</div>

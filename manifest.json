@@ -1,0 +1,11 @@
+{
+    "display_name": "ArcViGil",
+    "js": "index.js",
+    "css": "style.css",
+    "description": "Offline background simulation & SMTP email delivery. Characters can schedule messages to the user while they are away.",
+    "author": "Antigravity & Reality",
+    "version": "1.0.0",
+    "homePage": "https://github.com/kerjc4464/ArcViGil",
+    "requires": [],
+    "optional": []
+}
