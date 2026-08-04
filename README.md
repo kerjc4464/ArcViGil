@@ -41,7 +41,8 @@ https://github.com/kerjc4464/ArcViGil
 点确定，ST 会自动克隆到 `third-party/` 目录。安装后刷新页面，在扩展列表中启用 ArcViGil。
 
 ### 2. 启动后端
-进入 `ArcViGil-BackEnd` 目录，**双击 `start.bat`**。
+打开 `SillyTavern/public/scripts/extensions/third-party/ArcViGil/ArcViGil-BackEnd/`，
+**双击 `start.bat`**。
 
 脚本会自动做两件事：①安装 Python 依赖 ②启动后端服务。
 看到 `[ArcViGil] Backend and Scheduler started.` 就成功了，**黑框不要关**。
