@@ -14,7 +14,7 @@ if %errorlevel% neq 0 (
     exit /b
 )
 
-echo [2/2] Installing dependencies...
+echo [1/2] Installing dependencies...
 pip install -r requirements.txt -q
 if %errorlevel% neq 0 (
     echo.
