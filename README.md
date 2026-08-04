@@ -137,8 +137,4 @@ souls/
 *The Next Generation Of Arc,*
 *A Small Step Forward.*
 
----
-
-Made by Antigravity & Reality
-
 </div>
