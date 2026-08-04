@@ -76,9 +76,9 @@ ArcViGil 是一款 SillyTavern 扩展：**当你关闭浏览器下线后，角�
 
 ```
 souls/
-├── 爱尔奎特·布伦史塔德.txt
-├── 朱月·布伦史塔德.txt
-└── 薇薇安·布伦史塔德.txt
+├── 爱尔奎特·布伦史塔德.txt    ← 发信时参与者写"爱尔奎特·布伦史塔德"
+├── 薇薇安·布伦史塔德.json
+└── 朱月·布伦史塔德.md
 ```
 
 支持 txt / md / json / yaml 格式。角色输出发信标记时使用的名字必须与文件名一致（不含后缀）。
@@ -120,8 +120,8 @@ souls/
 
 <div align="center">
 
-*I'm Here, Always Online.*
-*They're Here, Always Online.*
+*I'm Here, Always Online.*<br>
+*They're Here, Always Online.*<br>
 *Everyone's Here, Always Online.*
 
 *The Next Generation Of Arc,*
