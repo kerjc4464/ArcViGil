@@ -50,23 +50,31 @@ ArcViGil 是一款 SillyTavern 扩展：**当你关闭浏览器下线后，角�
 
 ---
 
-## 部署指南
+## 快速开始
 
-### 第一步：安装前端插件
-1. 将本仓库放入 `SillyTavern/public/scripts/extensions/third-party/ArcViGil`
-2. 重启 SillyTavern，在扩展列表中启用 ArcViGil
+### 前提
+- 已安装 [SillyTavern](https://github.com/SillyTavern/SillyTavern)
+- 已安装 **Python 3.8 或更高版本**（[官网下载](https://www.python.org/downloads/)，安装时勾选"Add to PATH"）
 
-### 第二步：启动后端
-1. 需要 Python 3.8+
-2. 进入 `ArcViGil-BackEnd` 目录，双击 `start.bat`
-3. 看到 `[ArcViGil] Backend and Scheduler started.` 即成功，**保持黑框在后台运行**
+### 1. 安装前端插件
+将本仓库整个文件夹放入：
+```
+SillyTavern/public/scripts/extensions/third-party/ArcViGil
+```
+重启 SillyTavern，在扩展列表中启用 ArcViGil。
 
-### 第三步：连接与配置
+### 2. 启动后端
+进入 `ArcViGil-BackEnd` 目录，**双击 `start.bat`**。
+
+脚本会自动做两件事：①安装 Python 依赖 ②启动后端服务。
+看到 `[ArcViGil] Backend and Scheduler started.` 就成功了，**黑框不要关**。
+
+### 3. 连接并测试
 1. 刷新 SillyTavern 页面，打开 ArcViGil 设置面板
-2. 确认后端地址 `http://127.0.0.1:9000` 且状态灯为 Online
-3. 配置 LLM API（用于离线生成信件）
-4. 选择发信渠道（推荐 Resend，绕过防火墙；或传统 SMTP）
-5. 点击「发送测试邮件」验证收件
+2. 确认左上角状态灯为 <span style="color:#44ff88;">● Online</span>
+3. 填写 LLM API Key 和 API 地址
+4. 选择发信方式（推荐 Resend，无需开放端口；或传统 SMTP）
+5. 点击「发送测试邮件」——收到邮件说明一切就绪
 
 ---
 
