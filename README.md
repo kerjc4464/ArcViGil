@@ -6,7 +6,7 @@
 
 ![SillyTavern Plugin](https://img.shields.io/badge/Frontend-SillyTavern_Plugin-blue?style=for-the-badge)
 ![Python Backend](https://img.shields.io/badge/Backend-Python_FastAPI-green?style=for-the-badge)
-![License](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightgrey.svg?style=for-the-badge)
+![License](https://img.shields.io/badge/License-AGPL%20v3-blue.svg?style=for-the-badge)
 
 **让角色在你下线后，依然记得你们的约定。**
 
@@ -128,8 +128,8 @@ souls/
 
 ## 协议
 
-本项目采用 **CC-BY-NC 4.0（署名-非商业性使用）** 许可协议。
-允许自由下载、修改、个人使用；禁止商业用途；二次分发需保留署名。
+本项目采用 **GNU Affero General Public License v3.0 (AGPL-3.0)** 许可协议。
+允许自由使用、修改和分发；若通过网络提供服务或分发修改版本，必须以相同协议开源并提供完整源码。详见 [LICENSE](./LICENSE)。
 
 ---
 
