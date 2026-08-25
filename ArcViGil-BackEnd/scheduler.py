@@ -2,13 +2,26 @@ import sqlite3
 import time
 import json
 import os
+import re
+import base64
+import mimetypes
 import smtplib
 from email.mime.text import MIMEText
+from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 import requests
 
 DB_PATH = "database.db"
 SOULS_DIR = "souls"
+STICKERS_DIR = "stickers"
+MAX_STICKERS_PER_EMAIL = 10  # 每封邮件表情附件软上限（邮箱服务商普遍有附件体积限制）
+
+os.makedirs(STICKERS_DIR, exist_ok=True)
+
+# 支持的图片格式（附件型，电子邮件客户端普遍兼容 png/jpg/gif）
+STICKER_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
+# 同名多格式时的优先级（数字越小越优先，png/jpg 优先于 gif/webp）
+STICKER_EXT_PRIORITY = {'.png': 0, '.jpg': 0, '.jpeg': 0, '.gif': 1, '.webp': 1, '.bmp': 2}
 
 def get_config():
     """获取所有前端配置"""
@@ -27,24 +40,171 @@ def get_config():
         conn.close()
 
 def load_souls(participants):
-    """万能 Soul 加载器：支持 json, yaml, md, txt"""
+    """万能 Soul 加载器：支持 json, yaml, md, txt
+
+    增强：若 participants 使用简称（如 "朱月"），而文件为 "朱月·布伦史塔德.txt"，
+    会做模糊匹配（前缀/包含），避免“未找到设定的默认角色”导致角色失真。
+    """
     soul_texts = []
+    # 预扫描一次 souls 目录，建立 name -> path 映射（去扩展名）
+    available = {}
+    if os.path.isdir(SOULS_DIR):
+        for fname in os.listdir(SOULS_DIR):
+            fpath = os.path.join(SOULS_DIR, fname)
+            if os.path.isfile(fpath):
+                name, ext = os.path.splitext(fname)
+                if ext.lower() in ('.json', '.yaml', '.yml', '.md', '.txt'):
+                    # 同名多格式时保留第一个
+                    if name not in available:
+                        available[name] = fpath
+
+    def _fuzzy_find(p):
+        # 1) 精确
+        if p in available:
+            return available[p], p
+        # 2) 前缀 / 包含（处理 "爱尔奎特" -> "爱尔奎特·布伦史塔德"）
+        # 优先前缀匹配，其次包含匹配，取最短的那个（最贴近）
+        candidates = []
+        for name, fpath in available.items():
+            if name.startswith(p) or p.startswith(name) or p in name or name in p:
+                candidates.append((len(name), name, fpath))
+        if candidates:
+            candidates.sort()
+            _, best_name, best_path = candidates[0]
+            return best_path, best_name
+        return None, None
+
     for p in participants:
         found = False
+        # 先按原逻辑精确扩展名匹配（兼容全名）
         for ext in ['.json', '.yaml', '.yml', '.md', '.txt']:
             path = os.path.join(SOULS_DIR, f"{p}{ext}")
             if os.path.exists(path):
                 try:
                     with open(path, 'r', encoding='utf-8') as f:
-                        soul_texts.append(f"--- 角色设定 [{p}] ---\\n{f.read()}")
+                        soul_texts.append(f"--- 角色设定 [{p}] ---\n{f.read()}")
+                    print(f"[Scheduler] 精确加载 Soul: {p} -> {path}")
                     found = True
                     break
                 except Exception as e:
                     print(f"[Scheduler] 加载 {path} 失败: {e}")
+        if found:
+            continue
+        # 模糊匹配
+        fpath, real_name = _fuzzy_find(p)
+        if fpath and real_name:
+            try:
+                with open(fpath, 'r', encoding='utf-8') as f:
+                    soul_texts.append(f"--- 角色设定 [{p} / {real_name}] ---\n{f.read()}")
+                print(f"[Scheduler] 模糊加载 Soul: 请求={p} 命中={real_name} -> {fpath}")
+                found = True
+            except Exception as e:
+                print(f"[Scheduler] 模糊加载 {fpath} 失败: {e}")
         if not found:
-            soul_texts.append(f"--- 角色设定 [{p}] ---\\n(未找到设定的默认角色)")
+            print(f"[Scheduler] 警告: Soul 未找到: {p} (可用: {list(available.keys())})")
+            soul_texts.append(f"--- 角色设定 [{p}] ---\n(未找到设定的默认角色，系统已提示可用列表: {', '.join(available.keys()) or '空'})")
     
-    return "\\n".join(soul_texts)
+    return "\n".join(soul_texts)
+
+
+def scan_stickers():
+    """扫描 stickers/ 下的表情图片（子文件夹按组展示，根目录直接放置的归入「未分组」）。
+
+    返回 (stem_map, catalog)：
+    - stem_map: {文件名去扩展名: 相对路径} 全局查找表（跨文件夹平铺，重名时 png/jpg 优先，其余取首个 + 警告）
+    - catalog: 按文件夹分组 [{folder, stickers: [{name, filename, size_bytes, modified_at}]}]
+    """
+    stem_map = {}
+    catalog = []
+    if not os.path.isdir(STICKERS_DIR):
+        return stem_map, catalog
+
+    def register(fpath, folder_stickers):
+        fname = os.path.basename(fpath)
+        stem, ext = os.path.splitext(fname)
+        if ext.lower() not in STICKER_EXTENSIONS:
+            return
+        stat = os.stat(fpath)
+        entry = {"name": stem, "filename": fname,
+                 "size_bytes": stat.st_size, "modified_at": stat.st_mtime}
+        if stem in stem_map:
+            existing = stem_map[stem]
+            old_pri = STICKER_EXT_PRIORITY.get(os.path.splitext(existing)[1].lower(), 1)
+            new_pri = STICKER_EXT_PRIORITY.get(ext.lower(), 1)
+            if new_pri < old_pri:
+                print(f"[Sticker] 提示: [{stem}] 存在多个格式，优先使用 {fpath}")
+                stem_map[stem] = fpath
+                folder_stickers[stem] = entry
+            else:
+                print(f"[Sticker] 警告: 表情 [{stem}] 重名（{existing} 与 {fpath}），仅使用第一个")
+            return
+        stem_map[stem] = fpath
+        folder_stickers[stem] = entry
+
+    # 根目录直接放置的图片 → 未分组收藏
+    root_stickers = {}
+    for fname in sorted(os.listdir(STICKERS_DIR)):
+        fpath = os.path.join(STICKERS_DIR, fname)
+        if os.path.isfile(fpath):
+            register(fpath, root_stickers)
+    if root_stickers:
+        stickers = [root_stickers[s] for s in sorted(root_stickers)]
+        catalog.append({"folder": "未分组", "stickers": stickers})
+
+    # 子文件夹分组
+    for folder in sorted(os.listdir(STICKERS_DIR)):
+        folder_path = os.path.join(STICKERS_DIR, folder)
+        if not os.path.isdir(folder_path):
+            continue
+        folder_stickers = {}
+        for fname in sorted(os.listdir(folder_path)):
+            register(os.path.join(folder_path, fname), folder_stickers)
+        stickers = [folder_stickers[s] for s in sorted(folder_stickers)]
+        if stickers:
+            catalog.append({"folder": folder, "stickers": stickers})
+    return stem_map, catalog
+
+
+def load_sticker_catalog():
+    """生成注入提示词的 表情目录 + 使用规则 文本块（无表情时返回空串）"""
+    _, catalog = scan_stickers()
+    if not catalog:
+        return ""
+    lines = ["【表情】以下表情按文件夹分组展示。你可以不用，也可以在一封信里用多个（允许跨组混用）："]
+    for group in catalog:
+        markers = " ".join(f"[{s['name']}]" for s in group["stickers"])
+        lines.append(f"[{group['folder']}] {markers}")
+    lines.append("需要附表情时，在正文合适位置直接输出 [表情名] 标记（如 [Doro-happy]），系统会自动把对应图片作为邮件附件。")
+    return "\n".join(lines)
+
+
+STICKER_MARKER_RE = re.compile(r"\[([^\[\]]+)\]")
+
+def resolve_stickers(content):
+    """解析正文中的 [表情名] 标记。
+
+    - 只剥离能匹配到已注册表情的标记，其余 [xxx] 原样保留（防误伤普通文本）
+    - 返回 (清洗后的正文, 附件路径列表)
+    - 超过 MAX_STICKERS_PER_EMAIL 的部分只剥离不附加，并在日志提示
+    """
+    stem_map, _ = scan_stickers()
+    if not stem_map:
+        return content, []
+    attachments = []
+
+    def replace(m):
+        stem = m.group(1).strip()
+        path = stem_map.get(stem)
+        if path is None:
+            return m.group(0)
+        if len(attachments) < MAX_STICKERS_PER_EMAIL:
+            attachments.append(path)
+        else:
+            print(f"[Sticker] 提示: 表情数量超过上限 {MAX_STICKERS_PER_EMAIL}，[{stem}] 未附加")
+        return ""
+
+    cleaned = STICKER_MARKER_RE.sub(replace, content)
+    return cleaned, attachments
 
 DEFAULT_PROMPT_TEMPLATE = """你现在是以下角色：
 {souls}
@@ -55,6 +215,8 @@ DEFAULT_PROMPT_TEMPLATE = """你现在是以下角色：
 你定下的发信主题是：【{topic}】。
 
 {chat_context_now_block}
+
+{stickers}
 
 现在时间已到，请结合以上所有信息——角色设定、发信动机、主题，以及发信前的最新对话——用最符合你身份的语气，直接写出邮件的正文。只输出邮件正文，不要有多余的格式和废话。"""
 
@@ -82,6 +244,7 @@ def generate_email_content(topic, participants, chat_context_past, chat_context_
     prompt_template = config.get("promptTemplate", "").strip() or DEFAULT_PROMPT_TEMPLATE
 
     souls_content = load_souls(participants)
+    stickers_block = load_sticker_catalog()
 
     # History(now) 总开关：关闭动态同步时，既不更新也不注入最新聊天记录
     auto_sync = config.get("autoSyncContext", "false") == "true"
@@ -96,7 +259,11 @@ def generate_email_content(topic, participants, chat_context_past, chat_context_
         chat_context=now_context,
         chat_context_now_block=now_block,
         topic=topic,
+        stickers=stickers_block,
     )
+    # 自定义模板若未使用 {stickers} 占位符，自动把表情目录追加到末尾，保证功能可用
+    if "{stickers}" not in prompt_template and stickers_block:
+        system_prompt += "\n\n" + stickers_block
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -193,7 +360,21 @@ def generate_summary(content, participants_str, config):
         return ""
 
 
-def send_smtp_email(content, topic, participants, config):
+def _build_attachments(attachments):
+    """将附件路径列表转换为 [(路径, 文件名, MIME 子类型), ...]，跳过不存在的文件"""
+    result = []
+    for path in attachments or []:
+        if not os.path.isfile(path):
+            print(f"[Scheduler] 附件不存在，跳过: {path}")
+            continue
+        fname = os.path.basename(path)
+        mime_type, _ = mimetypes.guess_type(fname)
+        subtype = mime_type.split("/")[-1] if mime_type else "octet-stream"
+        result.append((path, fname, subtype))
+    return result
+
+
+def send_smtp_email(content, topic, participants, config, attachments=None):
     """跨次元 SMTP 投递"""
     server = config.get("smtpServer", "")
     port = int(config.get("smtpPort", 465))
@@ -213,6 +394,17 @@ def send_smtp_email(content, topic, participants, config):
     msg['To'] = target
     msg['Subject'] = subject
     msg.attach(MIMEText(content, 'plain', 'utf-8'))
+
+    # 附加表情图片
+    for path, fname, subtype in _build_attachments(attachments):
+        try:
+            with open(path, 'rb') as f:
+                img = MIMEImage(f.read(), _subtype=subtype)
+            img.add_header('Content-Disposition', 'attachment', filename=fname)
+            msg.attach(img)
+            print(f"[Scheduler] 已附加表情: {fname}")
+        except Exception as e:
+            print(f"[Scheduler] 附加 {fname} 失败: {e}")
     
     try:
         # 兼容 SSL (465) 和 STARTTLS (587)
@@ -234,7 +426,7 @@ def send_smtp_email(content, topic, participants, config):
         return False
 
 
-def send_resend_email(content, topic, participants, config):
+def send_resend_email(content, topic, participants, config, attachments=None):
     """通过 Resend HTTP API 发信 (绕过所有 SMTP 端口限制)"""
     api_key = config.get("resendApiKey", "")
     target  = config.get("targetEmail", "")
@@ -247,6 +439,27 @@ def send_resend_email(content, topic, participants, config):
     sender_name = " & ".join(participants)
     subject = f"来自 {sender_name} 的一封信：{topic}"
 
+    payload = {
+        "from": from_addr,
+        "to": [target],
+        "subject": subject,
+        "text": content,
+    }
+    # 附加表情图片（Resend API: attachments 数组，content 为 base64 字符串）
+    built = _build_attachments(attachments)
+    if built:
+        payload["attachments"] = []
+        for path, fname, _subtype in built:
+            try:
+                with open(path, 'rb') as f:
+                    payload["attachments"].append({
+                        "filename": fname,
+                        "content": base64.b64encode(f.read()).decode('utf-8'),
+                    })
+                print(f"[Scheduler] 已附加表情: {fname}")
+            except Exception as e:
+                print(f"[Scheduler] 附加 {fname} 失败: {e}")
+
     try:
         res = requests.post(
             "https://api.resend.com/emails",
@@ -254,12 +467,7 @@ def send_resend_email(content, topic, participants, config):
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
-            json={
-                "from": from_addr,
-                "to": [target],
-                "subject": subject,
-                "text": content,
-            },
+            json=payload,
             timeout=30,
         )
         if res.status_code in (200, 201):
@@ -273,13 +481,106 @@ def send_resend_email(content, topic, participants, config):
         return False
 
 
-def send_email(content, topic, participants, config):
+def send_resend_scheduled_email(content, topic, participants, config, scheduled_at_iso, attachments=None):
+    """通过 Resend HTTP API 定时发信（云端 scheduled 模式）
+
+    - 在任务创建时立刻生成内容，提交 Resend 并带 scheduled_at (ISO8601)
+    - 返回 (ok: bool, resend_id: str|None)，resend_id 用于后续取消/改期
+    - 复用 _build_attachments / base64 附件逻辑
+    """
+    api_key = config.get("resendApiKey", "")
+    target  = config.get("targetEmail", "")
+    from_addr = config.get("resendFrom", "ArcViGil <onboarding@resend.dev>")
+
+    if not api_key or not target:
+        print("[Scheduler] Resend 定时发送缺少 API Key 或目标邮箱，无法发送。")
+        return False, None
+
+    if not scheduled_at_iso:
+        print("[Scheduler] Resend 定时发送缺少 scheduled_at。")
+        return False, None
+
+    sender_name = " & ".join(participants)
+    subject = f"来自 {sender_name} 的一封信：{topic}"
+
+    payload = {
+        "from": from_addr,
+        "to": [target],
+        "subject": subject,
+        "text": content,
+        "scheduled_at": scheduled_at_iso,
+    }
+    built = _build_attachments(attachments)
+    if built:
+        payload["attachments"] = []
+        for path, fname, _subtype in built:
+            try:
+                with open(path, 'rb') as f:
+                    payload["attachments"].append({
+                        "filename": fname,
+                        "content": base64.b64encode(f.read()).decode('utf-8'),
+                    })
+                print(f"[Scheduler] 已附加表情: {fname}")
+            except Exception as e:
+                print(f"[Scheduler] 附加 {fname} 失败: {e}")
+
+    try:
+        res = requests.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=30,
+        )
+        if res.status_code in (200, 201):
+            try:
+                rid = res.json().get("id")
+            except Exception:
+                rid = None
+            print(f"[Scheduler] Resend 定时发送成功至 {target} (scheduled_at={scheduled_at_iso}, id={rid})")
+            return True, rid
+        else:
+            print(f"[Scheduler] Resend 定时发送失败: {res.status_code} {res.text}")
+            return False, None
+    except Exception as e:
+        print(f"[Scheduler] Resend 定时请求异常: {e}")
+        return False, None
+
+
+def cancel_resend_scheduled_email(resend_id, config):
+    """取消已调度的 Resend 邮件（POST /emails/{id}/cancel）"""
+    api_key = config.get("resendApiKey", "")
+    if not api_key or not resend_id:
+        return False
+    try:
+        res = requests.post(
+            f"https://api.resend.com/emails/{resend_id}/cancel",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            timeout=15,
+        )
+        if res.status_code in (200, 201):
+            print(f"[Scheduler] Resend 取消成功 id={resend_id}")
+            return True
+        else:
+            print(f"[Scheduler] Resend 取消失败 id={resend_id}: {res.status_code} {res.text}")
+            return False
+    except Exception as e:
+        print(f"[Scheduler] Resend 取消异常 id={resend_id}: {e}")
+        return False
+
+
+def send_email(content, topic, participants, config, attachments=None):
     """统一发信入口：根据 emailMethod 配置选择 SMTP 或 Resend"""
     method = config.get("emailMethod", "smtp")
     if method == "resend":
-        return send_resend_email(content, topic, participants, config)
+        return send_resend_email(content, topic, participants, config, attachments)
     else:
-        return send_smtp_email(content, topic, participants, config)
+        return send_smtp_email(content, topic, participants, config, attachments)
 
 def process_due_tasks():
     conn = sqlite3.connect(DB_PATH)
@@ -307,19 +608,23 @@ def process_due_tasks():
         
         # 1. 生成内容（past 冻结 + now 动态，now 受 autoSyncContext 总开关控制）
         content = generate_email_content(topic, participants, chat_context_past, chat_context, config)
-        
+
+        # 1.5 解析表情标记 → 剥离正文 + 收集附件
+        content, attachments = resolve_stickers(content)
+        attachment_names = [os.path.basename(p) for p in attachments]
+
         # 2. 发送邮件 (自动根据 emailMethod 配置选择 SMTP 或 Resend)
-        send_email(content, topic, participants, config)
+        send_email(content, topic, participants, config, attachments)
         
         # 3. 生成摘要（70-100字），失败静默留空
         sender_name = " & ".join(participants)
         summary = generate_summary(content, sender_name, config) if content else ""
 
-        # 4. 保存到消息库以供 ST 记忆注入（含主题+参与者+内容+摘要）
+        # 4. 保存到消息库以供 ST 记忆注入（含主题+参与者+内容+摘要+附件列表）
         subject = f"来自 {sender_name} 的一封信：{topic}"
         c.execute(
-            "INSERT INTO messages (subject, content, participants, created_at, synced_to_st, summary) VALUES (?, ?, ?, ?, 0, ?)",
-            (subject, content, sender_name, time.time(), summary)
+            "INSERT INTO messages (subject, content, participants, created_at, synced_to_st, summary, attachments) VALUES (?, ?, ?, ?, 0, ?, ?)",
+            (subject, content, sender_name, time.time(), summary, json.dumps(attachment_names))
         )
         
         # 5. 标记任务完成

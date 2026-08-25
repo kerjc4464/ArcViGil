@@ -6,16 +6,17 @@
     gap: 15px;
 }
 
-/* ===== 发送模式 Tab ===== */
+/* ===== 发送模式 & 调度模式 Tab (共用) ===== */
 .arcvigil-mode-tabs {
     display: flex;
     gap: 8px;
     flex-wrap: wrap;
 }
 
-.arcvigil-mode-tab {
+.arcvigil-mode-tab,
+.arcvigil-schedule-tab {
     flex: 1;
-    min-width: 120px;
+    min-width: 130px;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -27,27 +28,159 @@
     cursor: pointer;
     font-size: 13px;
     font-weight: bold;
-    transition: all 0.2s;
+    transition: all 0.2s ease;
     color: var(--grey_text);
+    position: relative;
+    user-select: none;
 }
 
-.arcvigil-mode-tab:hover {
+.arcvigil-mode-tab:hover,
+.arcvigil-schedule-tab:hover {
     border-color: rgba(167,139,250,0.4);
     color: var(--SmartThemeBodyColor);
+    transform: translateY(-1px);
+    background: rgba(255,255,255,0.06);
+}
+
+.arcvigil-mode-tab:active,
+.arcvigil-schedule-tab:active {
+    transform: translateY(0px) scale(0.98);
 }
 
 .arcvigil-mode-tab.active {
     background: rgba(167,139,250,0.15);
     border-color: rgba(167,139,250,0.7);
     color: #c4b5fd;
-    box-shadow: 0 0 10px rgba(167,139,250,0.2);
+    box-shadow: 0 0 12px rgba(167,139,250,0.25), inset 0 1px 0 rgba(255,255,255,0.06);
+}
+
+.arcvigil-schedule-tab.active {
+    box-shadow: 0 0 12px rgba(167,139,250,0.25), inset 0 1px 0 rgba(255,255,255,0.06);
+}
+
+/* 本地常驻 激活态 — 翠绿系 */
+.arcvigil-schedule-tab.active[data-schedule="local"] {
+    background: rgba(52,211,153,0.14);
+    border-color: rgba(52,211,153,0.65);
+    color: #a7f3d0;
+    box-shadow: 0 0 12px rgba(52,211,153,0.22);
+}
+.arcvigil-schedule-tab.active[data-schedule="local"] i {
+    color: #34d399;
+}
+
+/* 云端定时 激活态 — 紫色系 + 发光 */
+.arcvigil-schedule-tab.active[data-schedule="resend_scheduled"] {
+    background: rgba(167,139,250,0.16);
+    border-color: rgba(167,139,250,0.75);
+    color: #ddd6fe;
+    box-shadow: 0 0 14px rgba(167,139,250,0.32), inset 0 1px 0 rgba(255,255,255,0.08);
+}
+.arcvigil-schedule-tab.active[data-schedule="resend_scheduled"] i {
+    color: #a78bfa;
+}
+
+/* 选中态的勾选角标 */
+.arcvigil-mode-tab.active::after,
+.arcvigil-schedule-tab.active::after {
+    content: "✓";
+    position: absolute;
+    top: 6px;
+    right: 8px;
+    font-size: 11px;
+    font-weight: 900;
+    opacity: 0.9;
+}
+.arcvigil-mode-tab.active::after { color: #a78bfa; }
+.arcvigil-schedule-tab.active[data-schedule="local"]::after { color: #34d399; }
+.arcvigil-schedule-tab.active[data-schedule="resend_scheduled"]::after { color: #a78bfa; }
+
+/* 点击瞬间的脉冲 */
+.arcvigil-schedule-tab.pulse {
+    animation: tab-pulse 0.35s ease;
+}
+@keyframes tab-pulse {
+    0% { box-shadow: 0 0 0 rgba(167,139,250,0.0); }
+    50% { box-shadow: 0 0 18px rgba(167,139,250,0.45); }
+    100% { box-shadow: 0 0 12px rgba(167,139,250,0.25); }
 }
 
 .arcvigil-mode-badge {
     font-size: 10px;
     font-weight: normal;
-    opacity: 0.7;
+    opacity: 0.75;
     font-style: italic;
+    text-align: center;
+    line-height: 1.2;
+}
+
+/* ===== 调度模式提示条 ===== */
+.arcvigil-schedule-hint {
+    margin-top: 8px;
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 11px;
+    line-height: 1.6;
+    border: 1px solid transparent;
+    transition: all 0.25s ease;
+    display: flex;
+    gap: 6px;
+    align-items: flex-start;
+}
+.arcvigil-schedule-hint.local {
+    background: rgba(52,211,153,0.08);
+    border-color: rgba(52,211,153,0.28);
+    color: #a7f3d0;
+}
+.arcvigil-schedule-hint.cloud {
+    background: rgba(167,139,250,0.10);
+    border-color: rgba(167,139,250,0.32);
+    color: #ddd6fe;
+    box-shadow: 0 2px 10px rgba(167,139,250,0.12);
+}
+.arcvigil-schedule-hint i.hint-icon {
+    margin-top: 2px;
+    flex-shrink: 0;
+}
+.arcvigil-schedule-hint.local i.hint-icon { color: #34d399; }
+.arcvigil-schedule-hint.cloud i.hint-icon { color: #a78bfa; }
+
+.arcvigil-schedule-desc {
+    font-size: 11px;
+    color: var(--grey_text);
+    opacity: 0.72;
+    margin-top: 6px;
+    line-height: 1.5;
+    padding-left: 2px;
+    border-left: 2px solid transparent;
+    transition: all 0.2s;
+}
+.arcvigil-schedule-desc.active {
+    opacity: 1;
+    border-left-color: currentColor;
+    padding-left: 8px;
+}
+.arcvigil-schedule-desc.local.active { color: #a7f3d0; border-left-color: rgba(52,211,153,0.5); }
+.arcvigil-schedule-desc.cloud.active { color: #c4b5fd; border-left-color: rgba(167,139,250,0.5); }
+
+/* 同步行禁用态 */
+#arcvigil-auto-sync-row.disabled {
+    opacity: 0.45;
+    pointer-events: none;
+    filter: grayscale(0.2);
+}
+#arcvigil-auto-sync-row.disabled label {
+    cursor: not-allowed;
+}
+.arcvigil-sync-disabled-tag {
+    font-size: 10px;
+    color: #f59e0b;
+    background: rgba(245,158,11,0.12);
+    border: 1px solid rgba(245,158,11,0.28);
+    padding: 1px 6px;
+    border-radius: 4px;
+    margin-left: 6px;
+    white-space: nowrap;
 }
 
 /* ===== Resend 提示框 ===== */
@@ -563,4 +696,92 @@
     cursor: pointer;
     font-size: 13px;
     color: var(--SmartThemeBodyColor);
+}
+
+/* ===== �����ע������ ===== */
+.arcvigil-sticker-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    max-height: 280px;
+    overflow-y: auto;
+}
+
+.arcvigil-sticker-group {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid #3a3a5e;
+    border-radius: 8px;
+    padding: 10px;
+}
+
+.arcvigil-sticker-group-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: bold;
+    color: #d0d0e0;
+    margin-bottom: 8px;
+}
+
+.arcvigil-sticker-count {
+    font-size: 10px;
+    color: #a78bfa;
+    font-weight: normal;
+    background: rgba(167, 139, 250, 0.12);
+    padding: 1px 8px;
+    border-radius: 8px;
+}
+
+.arcvigil-sticker-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(88px, 1fr));
+    gap: 8px;
+}
+
+.arcvigil-sticker-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(167, 139, 250, 0.25);
+    border-radius: 8px;
+    padding: 6px;
+}
+
+.arcvigil-sticker-item img {
+    width: 100%;
+    height: 72px;
+    object-fit: contain;
+    border-radius: 4px;
+    background: rgba(0, 0, 0, 0.3);
+}
+
+.arcvigil-sticker-name {
+    font-size: 10px;
+    color: #b0b0c8;
+    word-break: break-all;
+    text-align: center;
+    line-height: 1.2;
+    max-width: 100%;
+}
+
+.arcvigil-letter-attachments {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+    margin-bottom: 8px;
+    font-size: 11px;
+    color: #a78bfa;
+}
+
+.arcvigil-attachment-chip {
+    background: rgba(167, 139, 250, 0.12);
+    border: 1px solid rgba(167, 139, 250, 0.3);
+    border-radius: 10px;
+    padding: 1px 8px;
+    font-size: 10px;
+    color: #c4b5fd;
 }

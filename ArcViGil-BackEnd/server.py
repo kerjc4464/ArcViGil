@@ -27,9 +27,11 @@ app.add_middleware(
 
 DB_PATH = "database.db"
 SOULS_DIR = "souls"
+STICKERS_DIR = "stickers"
 
 # 确保目录存在
 os.makedirs(SOULS_DIR, exist_ok=True)
+os.makedirs(STICKERS_DIR, exist_ok=True)
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -65,11 +67,22 @@ def init_db():
             c.execute(f"ALTER TABLE messages ADD COLUMN {col} TEXT DEFAULT '{default}'")
         except Exception:
             pass
+    # 迁移旧表：messages 补充 attachments 列（表情附件文件名 JSON 数组）
+    try:
+        c.execute("ALTER TABLE messages ADD COLUMN attachments TEXT DEFAULT '[]'")
+    except Exception:
+        pass
     # 迁移旧表：tasks 补充 chat_context_past 列（决定发信时的冻结上下文，动态同步不覆盖它）
     try:
         c.execute("ALTER TABLE tasks ADD COLUMN chat_context_past TEXT DEFAULT ''")
     except Exception:
         pass
+    # 迁移：tasks 新增 Resend 云端定时相关列
+    for col, default in [("resend_email_id", "''"), ("schedule_mode", "'local'")]:
+        try:
+            c.execute(f"ALTER TABLE tasks ADD COLUMN {col} TEXT DEFAULT {default}")
+        except Exception:
+            pass
     conn.commit()
     conn.close()
 
@@ -101,37 +114,141 @@ async def update_config(request: Request):
 
 @app.post("/api/schedule")
 async def schedule_tasks(request: Request):
-    """接收前端发送的发信任务"""
+    """接收前端发送的发信任务
+
+    双模式：
+    - local: 原逻辑，写入 pending，靠 scheduler 线程惰性生成
+    - resend_scheduled: 立刻生成内容+附件→调用 Resend 带 scheduled_at→写入 scheduled_remote+messages(created_at=trigger_at)
+      若超 30d / SMTP / 缺少 Resend 配置，自动回退 local
+    """
+    import scheduler
+    from datetime import datetime, timezone
     data = await request.json()
     tasks = data.get("tasks", [])
     chat_context = data.get("chat_context", "")
-    
+
+    config = scheduler.get_config()
+    # 前端可显式传 scheduleMode，优先级高于 DB 配置
+    req_mode = data.get("scheduleMode") or data.get("schedule_mode") or config.get("scheduleMode") or config.get("schedule_mode") or "local"
+    # 兼容部分旧前端字段命名
+    if isinstance(req_mode, str):
+        req_mode = req_mode.strip().lower()
+    use_resend_scheduled = (req_mode == "resend_scheduled")
+
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     now = time.time()
-    
+
+    scheduled_results = []
+    fallback_count = 0
+    scheduled_count = 0
+
     for t in tasks:
-        participants = json.dumps(t.get("participants", []))
+        participants_raw = t.get("participants", [])
+        participants = json.dumps(participants_raw)
         delay_hours = float(t.get("delay_hours", 0))
         topic = t.get("topic", "")
         trigger_at = now + (delay_hours * 3600)
-        
+
+        # 判断是否满足 Resend 云端条件
+        should_use_resend = use_resend_scheduled
+        fallback_reason = ""
+        if should_use_resend:
+            email_method = config.get("emailMethod", "resend")
+            if email_method != "resend":
+                should_use_resend = False
+                fallback_reason = "emailMethod非resend，自动回退本地"
+            elif delay_hours > 720:  # 30d = 720h
+                should_use_resend = False
+                fallback_reason = "超过30天上限，自动回退本地"
+            elif not config.get("resendApiKey") or not config.get("targetEmail"):
+                should_use_resend = False
+                fallback_reason = "缺少Resend配置，自动回退本地"
+
+        if should_use_resend:
+            # 立刻生成内容（autoSync已禁用，now_block为空）
+            try:
+                content = scheduler.generate_email_content(topic, participants_raw, chat_context, "", config)
+            except Exception as e:
+                print(f"[Schedule] 生成内容异常 {e}，回退本地: {topic}")
+                should_use_resend = False
+                fallback_reason = f"生成失败:{e}"
+
+        if should_use_resend:
+            # 解析表情
+            try:
+                content, attachments = scheduler.resolve_stickers(content)
+            except Exception as e:
+                print(f"[Schedule] 解析表情异常 {e}")
+                attachments = []
+            attachment_names = [os.path.basename(p) for p in (attachments or [])]
+            # 摘要
+            try:
+                sender_name_tmp = " & ".join(participants_raw) if participants_raw else "System"
+                summary = scheduler.generate_summary(content, sender_name_tmp, config) if content else ""
+            except Exception as e:
+                print(f"[Schedule] 生成摘要异常 {e}")
+                summary = ""
+            # ISO8601 UTC
+            try:
+                scheduled_at_iso = datetime.fromtimestamp(trigger_at, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+            except Exception:
+                scheduled_at_iso = datetime.fromtimestamp(trigger_at).isoformat()
+
+            ok, resend_id = scheduler.send_resend_scheduled_email(content, topic, participants_raw, config, scheduled_at_iso, attachments)
+            if ok:
+                # 任务写入 scheduled_remote
+                c.execute('''INSERT INTO tasks 
+                             (participants, delay_hours, topic, chat_context, chat_context_past, created_at, trigger_at, status, resend_email_id, schedule_mode) 
+                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                          (participants, delay_hours, topic, chat_context, chat_context, now, trigger_at, "scheduled_remote", resend_id or "", "resend_scheduled"))
+                task_id = c.lastrowid
+                # 消息写入，created_at=trigger_at 保证到点才注入
+                sender_name = " & ".join(participants_raw) if participants_raw else "System"
+                subject = f"来自 {sender_name} 的一封信：{topic}"
+                c.execute(
+                    "INSERT INTO messages (subject, content, participants, created_at, synced_to_st, summary, attachments) VALUES (?, ?, ?, ?, 0, ?, ?)",
+                    (subject, content, sender_name, trigger_at, summary, json.dumps(attachment_names))
+                )
+                scheduled_results.append({"task_id": task_id, "topic": topic, "trigger_at": trigger_at, "scheduled_at": scheduled_at_iso, "resend_id": resend_id or "", "status": "scheduled_remote"})
+                scheduled_count += 1
+                print(f"[Schedule] 云端定时成功 task_id={task_id} topic={topic} trigger_at={trigger_at} resend_id={resend_id}")
+                continue
+            else:
+                print(f"[Schedule] Resend 定时失败，回退本地: {topic}")
+                fallback_reason = "Resend API失败，自动回退本地"
+                # fallthrough to local insert
+
+        # 本地模式插入
+        if fallback_reason:
+            fallback_count += 1
+            print(f"[Schedule] 回退本地[{fallback_reason}] topic={topic}")
+            scheduled_results.append({"topic": topic, "trigger_at": trigger_at, "status": "pending_fallback", "reason": fallback_reason})
+
+        mode_val = "local"
         c.execute('''INSERT INTO tasks 
-                     (participants, delay_hours, topic, chat_context, chat_context_past, created_at, trigger_at, status) 
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-                  (participants, delay_hours, topic, chat_context, chat_context, now, trigger_at, "pending"))
-    
+                     (participants, delay_hours, topic, chat_context, chat_context_past, created_at, trigger_at, status, resend_email_id, schedule_mode) 
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                   (participants, delay_hours, topic, chat_context, chat_context, now, trigger_at, "pending", "", mode_val))
+
     conn.commit()
     conn.close()
-    return {"status": "ok"}
+    # 兼容旧前端只判断 status ok，新增字段供新前端使用
+    return {"status": "ok", "scheduled": scheduled_results, "scheduled_count": scheduled_count, "fallback_count": fallback_count, "mode": req_mode}
 
 @app.get("/api/tasks")
 async def get_tasks():
-    """供前端获取当前任务雷达（包含 pending 与 paused 暂停状态）"""
+    """供前端获取当前任务雷达（包含 pending / paused / scheduled_remote 云端）"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT id, participants, delay_hours, topic, trigger_at, status FROM tasks WHERE status IN ('pending', 'paused') ORDER BY trigger_at ASC")
-    rows = c.fetchall()
+    try:
+        c.execute("SELECT id, participants, delay_hours, topic, trigger_at, status, resend_email_id, schedule_mode FROM tasks WHERE status IN ('pending', 'paused', 'scheduled_remote') ORDER BY trigger_at ASC")
+        rows = c.fetchall()
+    except Exception:
+        # 兼容未迁移的旧表
+        c.execute("SELECT id, participants, delay_hours, topic, trigger_at, status FROM tasks WHERE status IN ('pending', 'paused', 'scheduled_remote') ORDER BY trigger_at ASC")
+        rows = c.fetchall()
+        rows = [(r[0], r[1], r[2], r[3], r[4], r[5], "", "local") for r in rows]
     conn.close()
     
     tasks = []
@@ -142,16 +259,33 @@ async def get_tasks():
             "delay_hours": r[2],
             "topic": r[3],
             "trigger_at": r[4],
-            "status": r[5]
+            "status": r[5],
+            "resend_email_id": r[6] if len(r) > 6 else "",
+            "schedule_mode": r[7] if len(r) > 7 else "local"
         })
     return {"status": "ok", "tasks": tasks}
 
 @app.delete("/api/tasks/{task_id}")
 async def delete_task(task_id: int):
-    """手动删除指定的待执行计划任务"""
+    """手动删除指定的待执行计划任务（云端任务会同步取消 Resend）"""
+    import scheduler
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("DELETE FROM tasks WHERE id = ? AND status IN ('pending', 'paused')", (task_id,))
+    # 先查是否为云端任务
+    try:
+        c.execute("SELECT status, resend_email_id FROM tasks WHERE id = ?", (task_id,))
+        row = c.fetchone()
+    except Exception:
+        row = None
+    if row and row[0] == "scheduled_remote" and row[1]:
+        config = scheduler.get_config()
+        # 尝试取消 Resend 侧，失败也继续删本地（幂等）
+        try:
+            scheduler.cancel_resend_scheduled_email(row[1], config)
+        except Exception as e:
+            print(f"[Delete] 取消 Resend 异常 {e}")
+
+    c.execute("DELETE FROM tasks WHERE id = ? AND status IN ('pending', 'paused', 'scheduled_remote')", (task_id,))
     deleted = c.rowcount > 0
     conn.commit()
     conn.close()
@@ -162,15 +296,34 @@ async def delete_task(task_id: int):
 
 @app.post("/api/tasks/{task_id}/toggle")
 async def toggle_task_status(task_id: int):
-    """在 pending (启用中) 与 paused (禁用/暂停) 之间切换任务状态"""
+    """在 pending (启用中) 与 paused (禁用/暂停) 之间切换任务状态
+
+    云端 scheduled_remote 不支持暂停（Resend 取消后不可恢复），返回错误提示前端。
+    """
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT status FROM tasks WHERE id = ?", (task_id,))
-    row = c.fetchone()
+    try:
+        c.execute("SELECT status, schedule_mode FROM tasks WHERE id = ?", (task_id,))
+        row = c.fetchone()
+    except Exception:
+        c.execute("SELECT status FROM tasks WHERE id = ?", (task_id,))
+        row = c.fetchone()
+        if row:
+            row = (row[0], "local")
     if not row or row[0] not in ('pending', 'paused'):
+        # scheduled_remote 单独提示
+        if row and row[0] == 'scheduled_remote':
+            conn.close()
+            return {"status": "error", "message": "云端定时任务不支持暂停，请直接删除（将同步取消Resend）"}
         conn.close()
         return {"status": "error", "message": "Task not found or completed"}
     
+    # 再次拦截云端模式
+    schedule_mode = row[1] if len(row) > 1 else "local"
+    if schedule_mode == "resend_scheduled" or row[0] == "scheduled_remote":
+        conn.close()
+        return {"status": "error", "message": "云端定时任务不支持暂停（取消后不可恢复），请删除重建"}
+
     new_status = 'paused' if row[0] == 'pending' else 'pending'
     c.execute("UPDATE tasks SET status = ? WHERE id = ?", (new_status, task_id))
     conn.commit()
@@ -218,6 +371,27 @@ async def list_souls():
                 })
     return {"status": "ok", "souls": souls}
 
+@app.get("/api/stickers")
+async def list_stickers():
+    """列出 stickers/ 目录下所有表情，按文件夹分组返回"""
+    import scheduler
+    _, catalog = scheduler.scan_stickers()
+    return {"status": "ok", "groups": catalog}
+
+@app.get("/api/stickers/image")
+async def sticker_image(folder: str = "", file: str = ""):
+    """返回表情图片（前端缩略图预览用），带路径穿越防护。folder 为空表示 stickers/ 根目录（未分组）"""
+    from fastapi.responses import FileResponse
+    if not file:
+        return {"status": "error", "message": "file 参数不能为空"}
+    safe_folder = os.path.basename(folder)
+    safe_file = os.path.basename(file)
+    base = os.path.abspath(STICKERS_DIR)
+    target = os.path.abspath(os.path.join(base, safe_folder, safe_file)) if safe_folder else os.path.abspath(os.path.join(base, safe_file))
+    if not target.startswith(base + os.sep) or not os.path.isfile(target):
+        return {"status": "error", "message": "表情不存在"}
+    return FileResponse(target)
+
 @app.get("/api/pull_messages")
 async def pull_messages():
     """供前端拉取已发送但尚未投递邮箱的邮件（一次性标记）——已废弃，保留兼容"""
@@ -242,23 +416,29 @@ async def get_messages(limit: int = 5, since: float = 0):
     持久化查询信件历史。
     limit: 最多返回最近几封（对应UI「最大注入信件数」）
     since: 只返回 created_at > since 的记录（对应用户「清空注入记忆」后的时间戳）
+    时间门控：只返回 created_at <= now 的记录，确保云端定时（created_at=trigger_at 未来值）到点才注入。
     不修改任何字段，幂等安全。
     """
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    now = time.time()
     c.execute(
-        "SELECT id, subject, content, participants, created_at, summary FROM messages "
-        "WHERE created_at > ? ORDER BY created_at DESC LIMIT ?",
-        (since, limit)
+        "SELECT id, subject, content, participants, created_at, summary, attachments FROM messages "
+        "WHERE created_at > ? AND created_at <= ? ORDER BY created_at DESC LIMIT ?",
+        (since, now, limit)
     )
     rows = c.fetchall()
     conn.close()
     # 按时间正序返回（最旧的在前，方便前端 chunk1/chunk2 递推）
-    messages = [
-        {"id": r[0], "subject": r[1], "content": r[2],
-         "participants": r[3], "created_at": r[4], "summary": r[5] or ""}
-        for r in reversed(rows)
-    ]
+    messages = []
+    for r in reversed(rows):
+        try:
+            atts = json.loads(r[6]) if r[6] else []
+        except Exception:
+            atts = []
+        messages.append({"id": r[0], "subject": r[1], "content": r[2],
+                         "participants": r[3], "created_at": r[4], "summary": r[5] or "",
+                         "attachments": atts})
     return {"status": "ok", "messages": messages}
 
 @app.post("/api/messages/ack")
@@ -341,11 +521,12 @@ async def test_task(task_id: int):
     - 在邮件主题和正文开头醒目标出 [测试/TEST RUN]
     - 真实发送邮件（让你在收件箱看到效果）
     - 不修改任务状态，不写入 messages 表（不污染主上下文）
+    - 兼容 scheduled_remote 云端任务（同样走即时生成测试）
     """
     import scheduler
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT participants, topic, chat_context, chat_context_past FROM tasks WHERE id=? AND status IN ('pending', 'paused')", (task_id,))
+    c.execute("SELECT participants, topic, chat_context, chat_context_past FROM tasks WHERE id=? AND status IN ('pending', 'paused', 'scheduled_remote')", (task_id,))
     row = c.fetchone()
     conn.close()
     if not row:
@@ -360,11 +541,14 @@ async def test_task(task_id: int):
     # 生成内容
     content = scheduler.generate_email_content(topic, participants, chat_context_past, chat_context, config)
 
+    # 解析表情标记 → 剥离正文 + 收集附件
+    content, attachments = scheduler.resolve_stickers(content)
+
     # 在主题和正文开头打上醒目的测试标记
     test_topic = f"[测试/TEST RUN] 来自 {' & '.join(participants)} 的一封信：{topic}"
     test_content = f"⚠️ [测试邮件 / TEST RUN] 此邮件为测试触发，内容不会记入对话记忆。\n{'='*40}\n\n{content}"
 
-    success = scheduler.send_email(test_content, test_topic, participants, config)
+    success = scheduler.send_email(test_content, test_topic, participants, config, attachments)
     if success:
         return {"status": "ok", "message": "Test email sent (not saved to DB)", "content": content}
     else:

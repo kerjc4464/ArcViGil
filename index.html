@@ -305,6 +305,7 @@
                     <span class="arcvigil-tag">{topic}</span> 发信主题
                     <span class="arcvigil-tag">{chat_context_now_block}</span> 最新对话区块（关闭同步时整块为空）
                     <span class="arcvigil-tag">{chat_context}</span> 最新对话（兼容旧模板的别名）
+                    <span class="arcvigil-tag">{stickers}</span> 表情目录（可用表情标记清单，无表情时为空）
                 </div>
                 <div class="arcvigil-form-group">
                     <textarea id="arcvigil-prompt-template" class="arcvigil-prompt-editor" rows="10"
@@ -335,9 +336,48 @@
                 </div>
             </div>
 
-            <!-- ===== 6. 行为设置 & 操作按钮 ===== -->
+            <!-- ===== 6b. 表情注册中心 ===== -->
             <div class="arcvigil-section">
-                <h4><i class="fa-solid fa-gear"></i> 行为设置</h4>
+                <h4><i class="fa-solid fa-images"></i> 表情注册中心</h4>
+                <p class="arcvigil-hint-text">
+                    将表情图片放入后端 <code>ArcViGil-BackEnd/stickers/&lt;分组文件夹&gt;/</code> 目录下，
+                    文件夹名仅作分组展示，就像 QQ / 微信的表情分组一样（如"爱尔奎特"、"Doro"）。
+                    也可以不建文件夹，把所有图片直接放进 <code>stickers/</code> 根目录，当作一个表情收藏夹。
+                    文件名（去扩展名）即标记名：如 <code>Doro-happy.png</code> → 标记 <code>[Doro-happy]</code>。
+                    支持 png / jpg / gif / webp，任意角色写信时都可在正文中输出任意表情标记，对应图片会自动作为邮件附件。
+                </p>
+                <div id="arcvigil-sticker-list" class="arcvigil-sticker-list">
+                    <div class="arcvigil-empty-msg">点击"刷新"查看已注册表情</div>
+                </div>
+                <div class="arcvigil-actions" style="margin-top: 8px;">
+                    <div id="arcvigil-sticker-refresh-btn" class="menu_button">
+                        <i class="fa-solid fa-arrows-rotate"></i> 刷新表情列表
+                    </div>
+                </div>
+            </div>
+
+            <!-- ===== 6. 行为设置 & 调度模式 ===== -->
+            <div class="arcvigil-section">
+                <h4><i class="fa-solid fa-gear"></i> 行为设置 & 调度模式</h4>
+                <div class="arcvigil-form-group">
+                    <label>调度模式 <span style="font-weight:normal; opacity:0.6; font-size:11px;">— 决定“何时生成 + 何处等待”</span></label>
+                    <div class="arcvigil-mode-tabs">
+                        <div id="arcvigil-schedule-tab-local" class="arcvigil-schedule-tab active" data-schedule="local">
+                            <i class="fa-solid fa-server"></i> 本地常驻
+                            <span class="arcvigil-mode-badge">传统 · 24*7 · 支持动态同步</span>
+                        </div>
+                        <div id="arcvigil-schedule-tab-resend_scheduled" class="arcvigil-schedule-tab" data-schedule="resend_scheduled">
+                            <i class="fa-solid fa-cloud-arrow-up"></i> Resend云端定时
+                            <span class="arcvigil-mode-badge">推荐 · 免常驻 · 限30天</span>
+                        </div>
+                    </div>
+                    <div id="arcvigil-schedule-mode-hint" class="arcvigil-schedule-hint local">
+                        <i class="fa-solid fa-circle-info hint-icon"></i>
+                        <span class="hint-text">本地模式：后端需 24*7 在线，到期时才调 LLM 惰性生成。支持动态同步 History(now)。</span>
+                    </div>
+                    <div id="arcvigil-schedule-desc-local" class="arcvigil-schedule-desc local active">本地：任务在触发时刻才生成，适合“越近越贴合最新对话”。</div>
+                    <div id="arcvigil-schedule-desc-resend" class="arcvigil-schedule-desc cloud" style="display:none;">云端：创建时立刻生成并提交 Resend（<code>scheduled_at</code>），邮件到点由 Resend 直发，DB 消息 <code>created_at=trigger_at</code> 到点才注入。超 720h / SMTP 自动回退本地。</div>
+                </div>
                 <div class="arcvigil-params-grid">
                     <div class="arcvigil-form-group">
                         <label for="arcvigil-context-depth-past">
@@ -360,7 +400,7 @@
                         <span>启用 ArcViGil (允许角色内联下达发信计划)</span>
                     </label>
                 </div>
-                <div class="flex-container alignitemscenter" style="margin-top: 8px;">
+                <div class="flex-container alignitemscenter" style="margin-top: 8px;" id="arcvigil-auto-sync-row">
                     <label class="checkbox_label">
                         <input type="checkbox" id="arcvigil-auto-sync-context" />
                         <span>🔄 动态同步 History(now) 到待执行任务（总开关：关闭后不再更新，发信时也不注入最新聊天记录，只基于 设定+发信动机+主题 生成）</span>

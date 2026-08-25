@@ -19,6 +19,8 @@ const DEFAULT_PROMPT_TEMPLATE = `你现在是以下角色：
 
 {chat_context_now_block}
 
+{stickers}
+
 现在时间已到，请结合以上所有信息——角色设定、发信动机、主题，以及发信前的最新对话——用最符合你身份的语气，直接写出邮件的正文。只输出邮件正文，不要有多余的格式和废话。`;
 
 const defaultSettings = {
@@ -33,6 +35,8 @@ const defaultSettings = {
     maxTokens:          1024,
     // 发信模式
     emailMethod:        "resend",
+    // 调度模式：local = 传统24*7惰性生成, resend_scheduled = Resend云端定时（创建时生成，到点注入）
+    scheduleMode:       "local",
     // Resend
     resendApiKey:       "",
     resendFrom:         "ArcViGil <onboarding@resend.dev>",
@@ -67,7 +71,7 @@ const defaultSettings = {
     summaryMaxTokens:   200,
     summaryPromptTemplate: "",    // 空=使用后端内置默认
     // 动态同步上下文设置
-    autoSyncContext:    false,    // 动态同步最新上下文到待执行任务
+    autoSyncContext:    false,    // 动态同步最新上下文到待执行任务（云端模式强制关闭）
 };
 
 let heartbeatInterval = null;
@@ -90,7 +94,27 @@ If you decide in the roleplay that you (or your group) want to send a message, o
 {"ArcViGil_Tasks": [{"participants": ["YourName"], "delay_hours": 2, "topic": "Your subject here"}]}
 </ArcViGil>
 You can schedule multiple tasks at once. Do NOT wrap this block in markdown code fences.
+IMPORTANT: For "participants", you MUST use the exact registered Soul names listed in [Available Souls] (injected below). Do not use abbreviations or nicknames.
 `;
+
+// Soul 列表缓存（用于注入调度提示词，避免每条消息都请求）
+let cachedSoulNames = null;
+let soulCacheTime = 0;
+async function getSoulNamesForPrompt(force = false) {
+    const now = Date.now();
+    if (!force && cachedSoulNames && (now - soulCacheTime) < 30000) return cachedSoulNames;
+    const url = extension_settings[extensionName]?.backendUrl;
+    if (!url) return [];
+    try {
+        const res = await fetch(`${url}/api/souls`);
+        if (!res.ok) return cachedSoulNames || [];
+        const data = await res.json();
+        const names = (data.souls || []).map(s => s.name);
+        cachedSoulNames = names;
+        soulCacheTime = now;
+        return names;
+    } catch { return cachedSoulNames || []; }
+}
 
 // ========== 设置管理 ==========
 function loadSettings() {
@@ -123,6 +147,8 @@ function saveSettings() {
     s.topP           = Number($("#arcvigil-top-p").val());
     s.topK           = Number($("#arcvigil-top-k").val());
     s.maxTokens      = Number($("#arcvigil-max-tokens").val());
+    // 调度模式
+    s.scheduleMode   = $(".arcvigil-schedule-tab.active").data("schedule") || "local";
     // 发信模式
     s.emailMethod    = $(".arcvigil-mode-tab.active").data("mode") || "resend";
     
@@ -159,9 +185,14 @@ function saveSettings() {
     s.summaryTemperature = Number($("#arcvigil-summary-temperature").val());
     s.summaryMaxTokens   = Number($("#arcvigil-summary-max-tokens").val());
     s.summaryPromptTemplate = $("#arcvigil-summary-prompt-template").val();
-    // 动态同步上下文
+    // 动态同步上下文（云端模式强制关闭）
     s.injectEnabled     = $("#arcvigil-inject-enabled").prop("checked");
-    s.autoSyncContext   = $("#arcvigil-auto-sync-context").prop("checked");
+    const isResendScheduled = s.scheduleMode === "resend_scheduled";
+    if (isResendScheduled) {
+        s.autoSyncContext = false;
+    } else {
+        s.autoSyncContext   = $("#arcvigil-auto-sync-context").prop("checked");
+    }
     // 持久化到磁盘，页面刷新后设置不丢失
     saveSettingsDebounced();
 }
@@ -177,12 +208,18 @@ function renderSettings() {
     setSliderPair("arcvigil-top-p",       s.topP);
     setSliderPair("arcvigil-top-k",       s.topK);
     setSliderPair("arcvigil-max-tokens",  s.maxTokens);
-    // 模式
+    // 调度模式
+    const sched = s.scheduleMode || "local";
+    $(".arcvigil-schedule-tab").removeClass("active");
+    $(`#arcvigil-schedule-tab-${sched}`).addClass("active");
+    // 邮件模式
     const mode = s.emailMethod || "resend";
     $(".arcvigil-mode-tab").removeClass("active");
     $(`#arcvigil-mode-tab-${mode}`).addClass("active");
     $("#arcvigil-panel-resend, #arcvigil-panel-smtp").hide();
     $(`#arcvigil-panel-${mode}`).show();
+    // 调度模式关联的动态同步禁用状态
+    applyScheduleModeUI(sched);
 
     // Resend
     $("#arcvigil-resend-api-key").val(s.resendApiKey || "");
@@ -221,6 +258,68 @@ function renderSettings() {
     // 摘要自定义面板默认折叠 — 由 init 中的 toggleSummaryCustomPanel 统一处理
     // 动态同步上下文
     $("#arcvigil-auto-sync-context").prop("checked", s.autoSyncContext ?? false);
+    applyScheduleModeUI(s.scheduleMode || "local");
+}
+
+// 根据调度模式更新 UI 联动（云端时禁用动态同步）
+// isUserSwitch=true 时会弹 toast / 脉冲动画，初始化渲染时不打扰
+function applyScheduleModeUI(sched, isUserSwitch = false) {
+    const isResendScheduled = sched === "resend_scheduled";
+    const $sync = $("#arcvigil-auto-sync-context");
+    const $hint = $("#arcvigil-schedule-mode-hint");
+    const $hintText = $hint.find(".hint-text");
+    const $descLocal = $("#arcvigil-schedule-desc-local");
+    const $descResend = $("#arcvigil-schedule-desc-resend");
+    const $row = $("#arcvigil-auto-sync-row");
+
+    // 移除旧态
+    $hint.removeClass("local cloud");
+    $descLocal.removeClass("active");
+    $descResend.removeClass("active");
+
+    if (isResendScheduled) {
+        $sync.prop("checked", false).prop("disabled", true);
+        $row.addClass("disabled");
+        // 动态同步旁加小标签
+        if ($row.find(".arcvigil-sync-disabled-tag").length === 0) {
+            $row.find("label").append('<span class="arcvigil-sync-disabled-tag">云端已禁用</span>');
+        }
+        $hint.addClass("cloud");
+        $hint.find("i.hint-icon").attr("class", "fa-solid fa-cloud-arrow-up hint-icon");
+        $hintText.html('云端定时：创建时立刻生成并提交 Resend，到点由 Resend 发送并到点才注入记忆。动态同步已自动关闭，内容以创建时刻为准。');
+        $descResend.show().addClass("active");
+        $descLocal.hide();
+        const emailMode = $(".arcvigil-mode-tab.active").data("mode");
+        if (emailMode === "smtp") {
+            $hintText.append('<br><span style="color:#f59e0b; font-weight:bold;">⚠️ SMTP 不支持云端定时，已自动视为本地（超限回退）。请切回 Resend 以启用云端。</span>');
+        }
+        if (isUserSwitch) {
+            toastr.info("☁️ 已切换至 Resend云端定时 — 创建时生成，免后端常驻（限30天）");
+        }
+    } else {
+        $sync.prop("disabled", false);
+        $row.removeClass("disabled");
+        $row.find(".arcvigil-sync-disabled-tag").remove();
+        $hint.addClass("local");
+        $hint.find("i.hint-icon").attr("class", "fa-solid fa-server hint-icon");
+        $hintText.text('本地常驻：后端需 24*7 在线，到期时才调 LLM 惰性生成。支持动态同步 History(now)。');
+        $descLocal.show().addClass("active");
+        $descResend.hide();
+        if (isUserSwitch) {
+            toastr.success("🟢 已切换至 本地常驻 — 惰性生成，支持动态同步");
+        }
+    }
+
+    // 数值输入行的可用态跟随
+    const $nowDepth = $("#arcvigil-context-depth-now");
+    const $nowLabel = $('label[for="arcvigil-context-depth-now"]');
+    if (isResendScheduled) {
+        $nowDepth.prop("disabled", true).css("opacity", "0.45");
+        $nowLabel.css("opacity", "0.45");
+    } else {
+        $nowDepth.prop("disabled", false).css("opacity", "1");
+        $nowLabel.css("opacity", "1");
+    }
 }
 
 // 滑块 & 数字框联动助手 (id 不含 -slider 后缀)
@@ -317,6 +416,13 @@ async function refreshSoulList() {
         const res = await fetch(`${url}/api/souls`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
+        // 同步更新调度提示词的 Soul 缓存
+        try {
+            cachedSoulNames = (data.souls || []).map(s => s.name);
+            soulCacheTime = Date.now();
+            // 若当前已注入，刷新一次以更新提示词
+            refreshInjection();
+        } catch {}
         $list.empty();
         if (!data.souls || data.souls.length === 0) {
             $list.append('<div class="arcvigil-empty-msg">souls/ 目录为空，暂无注册角色</div>');
@@ -338,12 +444,71 @@ async function refreshSoulList() {
     }
 }
 
+// ========== 表情注册中心 ==========
+async function refreshStickerList() {
+    const url = extension_settings[extensionName].backendUrl;
+    if (!url) {
+        toastr.warning("ArcViGil: 请先填写并保存后端地址");
+        return;
+    }
+    const $list = $("#arcvigil-sticker-list");
+    $list.html('<div class="arcvigil-empty-msg"><i class="fa-solid fa-spinner fa-spin"></i> 加载中...</div>');
+    try {
+        const res = await fetch(`${url}/api/stickers`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        $list.empty();
+        const groups = data.groups || [];
+        if (groups.length === 0) {
+            $list.append('<div class="arcvigil-empty-msg">stickers/ 目录为空，暂无表情</div>');
+        } else {
+            groups.forEach((g) => {
+                const stickersHtml = (g.stickers || []).map((s) => `
+                    <div class="arcvigil-sticker-item" title="标记: [${s.name}]">
+                        <img src="${url}/api/stickers/image?folder=${encodeURIComponent(g.folder)}&file=${encodeURIComponent(s.filename)}"
+                             loading="lazy" alt="${s.name}" />
+                        <span class="arcvigil-sticker-name">${s.name}</span>
+                    </div>`).join("");
+                $list.append(`
+                    <div class="arcvigil-sticker-group">
+                        <div class="arcvigil-sticker-group-header">
+                            <i class="fa-solid fa-folder-open" style="color:#a78bfa;"></i>
+                            <span>${g.folder}</span>
+                            <span class="arcvigil-sticker-count">${g.stickers.length} 张</span>
+                        </div>
+                        <div class="arcvigil-sticker-grid">${stickersHtml}</div>
+                    </div>`);
+            });
+        }
+    } catch (e) {
+        $list.html('<div class="arcvigil-empty-msg" style="color:#ff6b6b;">读取失败，请确认后端已启动</div>');
+        console.error("[ArcViGil] refreshStickerList failed:", e);
+    }
+}
+
 // ========== 记忆注入 ==========
 async function buildPrompt() {
     const s = extension_settings[extensionName];
     if (!s.enable) return "";
 
     let prompt = s.systemPrompt || DEFAULT_SYSTEM_PROMPT;
+
+    // Soul 列表注入：让模型知道可用发信角色（仅在启用时，且后端在线时）
+    // 这样 participants 必须使用已注册的完整文件名，避免 "未找到设定的默认角色"
+    try {
+        const soulNames = await getSoulNamesForPrompt();
+        if (soulNames && soulNames.length > 0) {
+            // 避免重复注入：如果系统提示词已包含 [Available Souls] 则跳过
+            if (!prompt.includes("[Available Souls]")) {
+                prompt += `\n\n[Available Souls: ${soulNames.join(" | ")}]\n(You MUST choose participants ONLY from this list, using exact names as shown)`;
+            }
+            console.log(`[ArcViGil] 已注入 Soul 列表 (${soulNames.length}):`, soulNames.join(", "));
+        } else if (soulNames && soulNames.length === 0) {
+            console.warn("[ArcViGil] Soul 列表为空，请在 souls/ 目录放置角色文件");
+        }
+    } catch (e) {
+        console.warn("[ArcViGil] Soul 列表注入失败:", e);
+    }
 
     // 历史信件注入：由 injectEnabled 独立控制，关闭时只保留调度 prompt
     if (s.injectEnabled !== false && s.backendUrl) {
@@ -438,6 +603,10 @@ async function refreshLetterList() {
             const summaryHtml = summary
                 ? `<div class="arcvigil-letter-summary">摘要: ${summary}</div>`
                 : "";
+            const atts = Array.isArray(msg.attachments) ? msg.attachments : [];
+            const attachmentsHtml = atts.length > 0
+                ? `<div class="arcvigil-letter-attachments"><i class="fa-solid fa-paperclip"></i> ${atts.map((a) => `<span class="arcvigil-attachment-chip">${a}</span>`).join("")}</div>`
+                : "";
 
             const $item = $(`
                 <div class="arcvigil-letter-item" data-id="${msg.id}">
@@ -452,6 +621,7 @@ async function refreshLetterList() {
                     </div>
                     <div class="arcvigil-letter-body">
                         ${summaryHtml}
+                        ${attachmentsHtml}
                         <div class="arcvigil-letter-content-box">${msg.content}</div>
                     </div>
                 </div>
@@ -477,6 +647,8 @@ async function refreshLetterList() {
 async function syncContextToPendingTasks() {
     const s = extension_settings[extensionName];
     if (!s.autoSyncContext || !s.backendUrl) return;
+    // 云端模式强制禁用同步
+    if (s.scheduleMode === "resend_scheduled") return;
 
     const context = getContext();
     const depth = s.contextDepthNow || 20; // History(now) 滑动窗口条数
@@ -497,53 +669,161 @@ async function syncContextToPendingTasks() {
 }
 
 // ========== 任务提交 ==========
+function decodeHtmlEntities(str) {
+    return str
+        .replace(/&amp;quot;/g, '"').replace(/&amp;#34;/g, '"').replace(/&amp;#x22;/gi, '"')
+        .replace(/&quot;/g, '"').replace(/&#34;/g, '"').replace(/&#x22;/gi, '"')
+        .replace(/&amp;lt;/g, '<').replace(/&lt;/g, '<')
+        .replace(/&amp;gt;/g, '>').replace(/&gt;/g, '>')
+        .replace(/&amp;amp;/g, '&').replace(/&amp;/g, '&')
+        .replace(/&#39;/g, "'").replace(/&#x27;/gi, "'").replace(/&apos;/g, "'");
+}
 async function submitTasks(tasksJsonStr) {
+    let cleanForLog = tasksJsonStr;
     try {
+        // 深度解码 HTML 实体（处理 &quot; &amp;quot; &#34; 等多重编码）
+        let cleanJson = decodeHtmlEntities(tasksJsonStr);
         // 清理由于 ST 的 Markdown/HTML 渲染混入的杂质
-        let cleanJson = tasksJsonStr
+        cleanJson = cleanJson
             .replace(/<br\s*\/?>/gi, "") // 移除换行标签
             .replace(/<[^>]*>/g, "") // 移除所有其他 HTML 标签
-            .replace(/[\u200B-\u200D\uFEFF]/g, ''); // 移除零宽字符
-            
-        const obj = JSON.parse(cleanJson);
+            .replace(/[\u200B-\u200D\uFEFF]/g, '') // 移除零宽字符
+            .trim();
+        // 尝试直接解析
+        let obj;
+        try {
+            obj = JSON.parse(cleanJson);
+        } catch (e1) {
+            // 兼容性修复：尝试修复常见 LLM 输出问题（单引号、尾逗号、未闭合括号）
+            console.warn("[ArcViGil] 初次 JSON 解析失败，尝试修复:", e1.message, cleanJson.slice(0, 400));
+            let fixed = cleanJson
+                .replace(/,\s*([}\]])/g, '$1') // 移除尾逗号
+                .replace(/'/g, '"'); // 单引号转双引号（谨慎）
+            obj = JSON.parse(fixed);
+            console.log("[ArcViGl] 修复后解析成功");
+        }
+        cleanForLog = cleanJson;
         if (!obj.ArcViGil_Tasks) return;
 
+        const s = extension_settings[extensionName];
         const context = getContext();
-        const depth = extension_settings[extensionName].contextDepthPast || 20;
+        const depth = s.contextDepthPast || 20;
         const recentChat = (context.chat || [])
             .slice(-depth)
             .map((m) => `${m.name}: ${m.mes}`)
             .join("\n");
 
-        const res = await fetch(`${extension_settings[extensionName].backendUrl}/api/schedule`, {
+        const scheduleMode = s.scheduleMode || "local";
+        // 云端模式前端预校验
+        if (scheduleMode === "resend_scheduled") {
+            const hasLong = obj.ArcViGil_Tasks.some(t => Number(t.delay_hours) > 720);
+            if (hasLong) {
+                toastr.warning("ArcViGil: 云端定时限30天(720h)，超期任务将自动回退为本地常驻模式");
+            }
+            if (s.emailMethod === "smtp") {
+                toastr.warning("ArcViGil: SMTP不支持云端定时，任务将回退为本地模式。如需云端请切Resend");
+            }
+        }
+
+        const res = await fetch(`${s.backendUrl}/api/schedule`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ tasks: obj.ArcViGil_Tasks, chat_context: recentChat }),
+            body: JSON.stringify({ tasks: obj.ArcViGil_Tasks, chat_context: recentChat, scheduleMode: scheduleMode }),
         });
         if (res.ok) {
-            toastr.success("📨 ArcViGil: 发信计划已部署！角色将在预定时间自动发出信件。");
+            let msg = "📨 ArcViGil: 发信计划已部署！角色将在预定时间自动发出信件。";
+            try {
+                const data = await res.clone().json();
+                if (data.mode === "resend_scheduled") {
+                    if (data.scheduled_count > 0 && data.fallback_count === 0) {
+                        msg = `☁️ ArcViGil 云端定时：${data.scheduled_count}个任务已提交Resend（到点自动发送+注入，后端可离线）`;
+                    } else if (data.fallback_count > 0) {
+                        msg = `☁️ ArcViGil 云端：${data.scheduled_count}个已上云，${data.fallback_count}个因限制回退本地`;
+                        if (data.fallback_count > 0) toastr.warning(msg);
+                    }
+                }
+            } catch {}
+            if (scheduleMode !== "resend_scheduled" || !msg.includes("回退")) {
+                toastr.success(msg);
+            }
             updateTaskRadar();
+            // 云端模式下，消息会在 trigger_at 才可见，刷新注入也会自动时间门控
+            if (scheduleMode === "resend_scheduled") {
+                setTimeout(refreshInjection, 800);
+            }
         } else {
             toastr.error("ArcViGil: 任务部署失败");
         }
     } catch (e) {
-        console.error("[ArcViGil] submitTasks error:", e, tasksJsonStr);
-        toastr.warning("ArcViGil: 提取到任务内容但解析失败，格式有误");
+        console.error("[ArcViGil] submitTasks error:", e, "原始:", tasksJsonStr, "清洗后:", cleanForLog);
+        const preview = (cleanForLog || tasksJsonStr || "").slice(0, 300).replace(/\n/g, "\\n");
+        console.error("[ArcViGil] 解析失败的 JSON 预览:", preview);
+        toastr.warning(`ArcViGil: 提取到任务内容但解析失败: ${e.message} (已在控制台输出详情)`, "", { timeOut: 6000 });
     }
+}
+
+// 提取 JSON 的辅助：用大括号计数精确截取，避免贪婪匹配到多余内容
+function extractArcViGilJson(text) {
+    const decoded = decodeHtmlEntities(text);
+    const keyIdx = decoded.indexOf("ArcViGil_Tasks");
+    if (keyIdx === -1) return null;
+    // 向前找到最近的 {
+    let start = decoded.lastIndexOf("{", keyIdx);
+    if (start === -1) return null;
+    let depth = 0;
+    let inStr = false;
+    let esc = false;
+    for (let i = start; i < decoded.length; i++) {
+        const ch = decoded[i];
+        if (inStr) {
+            if (esc) esc = false;
+            else if (ch === "\\") esc = true;
+            else if (ch === '"') inStr = false;
+        } else {
+            if (ch === '"') inStr = true;
+            else if (ch === "{") depth++;
+            else if (ch === "}") {
+                depth--;
+                if (depth === 0) {
+                    // 向后尝试包含可能的数组闭合和外层 }
+                    // 已经到最外层闭合，返回截取
+                    return decoded.slice(start, i + 1);
+                }
+            }
+        }
+    }
+    // 降级：贪婪匹配到最后一个 }
+    const last = decoded.lastIndexOf("}");
+    if (last > start) return decoded.slice(start, last + 1);
+    return null;
 }
 
 // ========== 消息拦截 ==========
 function interceptMessage(text) {
     if (!extension_settings[extensionName].enable) return text;
-    // 兼容带或不带 <ArcViGil> 标签的 JSON，且考虑到可能被包裹在 Markdown 代码块里
-    // 使用非贪婪匹配到最后一个右大括号（因为可能有多层嵌套结构）
-    const regex = /(?:```[a-z]*\n)?(?:<ArcViGil>\s*)?(\{\s*(?:"|&quot;|)ArcViGil_Tasks(?:"|&quot;|)[\s\S]*\})(?:\s*<\/ArcViGil>)?(?:\n```)?/i;
+    // 先尝试精确大括号计数提取
+    let jsonStr = extractArcViGilJson(text);
+    let matchedRaw = null;
+    if (jsonStr) {
+        // 找到原始匹配段用于后续移除（尽量精确）
+        const idx = decodeHtmlEntities(text).indexOf(jsonStr);
+        // 在原始 text 中寻找对应的移除区间（处理编码差异，降级用正则）
+        const regex = /(?:```[a-z]*\n)?(?:<ArcViGil>\s*)?(\{\s*(?:"|&quot;|&amp;quot;|&#34;)?ArcViGil_Tasks[\s\S]*?)(?:\s*<\/ArcViGil>)?(?:\n```)?/i;
+        const m = text.match(regex);
+        if (m) matchedRaw = m[0];
+        else matchedRaw = jsonStr;
+        jsonStr = decodeHtmlEntities(jsonStr).trim();
+        submitTasks(jsonStr);
+        if (matchedRaw) return text.replace(matchedRaw, "").trim();
+        // 降级：直接移除 jsonStr 本体
+        return text.replace(jsonStr, "").trim();
+    }
+    // 兼容旧正则路径
+    const regex = /(?:```[a-z]*\n)?(?:<ArcViGil>\s*)?(\{\s*(?:"|&quot;|&amp;quot;|&#34;)?ArcViGil_Tasks(?:"|&quot;|&amp;quot;|&#34;)?[\s\S]*\})(?:\s*<\/ArcViGil>)?(?:\n```)?/i;
     const match = text.match(regex);
     if (match) {
-        let jsonStr = match[1].trim();
-        // 如果 HTML 实体被转义，反转义一下，防止 JSON.parse 报错
-        jsonStr = jsonStr.replace(/&quot;/g, '"');
-        submitTasks(jsonStr);
+        let s = decodeHtmlEntities(match[1].trim());
+        submitTasks(s);
         return text.replace(match[0], "").trim();
     }
     return text;
@@ -566,28 +846,37 @@ async function updateTaskRadar() {
                 const dt = new Date(t.trigger_at * 1000).toLocaleString();
                 const names = JSON.parse(t.participants).join(", ");
                 const isPaused = t.status === 'paused';
-                const opacityStyle = isPaused ? "opacity: 0.55; border-left-color: #6b7280;" : "";
-                const badgeHtml = isPaused ? `<span style="font-size:10px; color:#f59e0b; background:rgba(245,158,11,0.15); padding:1px 5px; border-radius:3px; margin-left:6px; font-weight:normal;">已禁用/归档</span>` : "";
-                const toggleIcon = isPaused
+                const isCloud = t.status === 'scheduled_remote' || t.schedule_mode === 'resend_scheduled';
+                const opacityStyle = isPaused ? "opacity: 0.55; border-left-color: #6b7280;" : (isCloud ? "border-left-color:#a78bfa;" : "");
+                let badgeHtml = "";
+                if (isPaused) {
+                    badgeHtml = `<span style="font-size:10px; color:#f59e0b; background:rgba(245,158,11,0.15); padding:1px 5px; border-radius:3px; margin-left:6px; font-weight:normal;">已禁用/归档</span>`;
+                } else if (isCloud) {
+                    badgeHtml = `<span style="font-size:10px; color:#a78bfa; background:rgba(167,139,250,0.15); padding:1px 5px; border-radius:3px; margin-left:6px; font-weight:normal;">☁️ 云端定时</span>`;
+                }
+                const toggleIcon = isCloud
+                    ? `<i class="fa-solid fa-ban arcvigil-task-toggle-btn disabled" data-id="${t.id}" title="云端任务不支持暂停（取消后不可恢复，请直接删除）" style="color:#6b7280; cursor:not-allowed; padding: 5px; opacity:0.45;"></i>`
+                    : isPaused
                     ? `<i class="fa-solid fa-play arcvigil-task-toggle-btn" data-id="${t.id}" title="点击恢复启用此任务" style="color:#34d399; cursor:pointer; padding: 5px;"></i>`
                     : `<i class="fa-solid fa-pause arcvigil-task-toggle-btn" data-id="${t.id}" title="点击禁用/暂停此任务（暂停后不会自动触发发信）" style="color:#f59e0b; cursor:pointer; padding: 5px;"></i>`;
+                const cloudIdHint = isCloud && t.resend_email_id ? ` · Resend:${String(t.resend_email_id).slice(0,8)}…` : "";
 
                 $list.append(`
                     <div class="arcvigil-task-item" style="display:flex; justify-content:space-between; align-items:center; ${opacityStyle}">
                         <div style="flex:1; min-width:0;">
                             <div class="task-title">${names} → ${t.topic}${badgeHtml}</div>
-                            <div class="task-meta">触发时间: ${dt}</div>
+                            <div class="task-meta">触发时间: ${dt}${cloudIdHint} ${isCloud ? '<span style="color:#a78bfa;">(到点云端直发，到点才注入)</span>' : ''}</div>
                         </div>
                         <div style="display:flex; gap:4px; align-items:center; flex-shrink:0;">
                             ${toggleIcon}
                             <i class="fa-solid fa-flask arcvigil-task-test-btn" data-id="${t.id}" title="[测试] 立即生成并发送测试邮件（不入库，不影响计划）" style="color:#a78bfa; cursor:pointer; padding: 5px;"></i>
-                            <i class="fa-solid fa-trash arcvigil-task-delete-btn" data-id="${t.id}" title="删除此任务" style="color:#ef4444; cursor:pointer; padding: 5px;"></i>
+                            <i class="fa-solid fa-trash arcvigil-task-delete-btn" data-id="${t.id}" title="${isCloud ? '删除并同步取消Resend云端定时' : '删除此任务'}" style="color:#ef4444; cursor:pointer; padding: 5px;"></i>
                         </div>
                     </div>`);
             });
 
-            // 绑定禁用/恢复状态切换按钮
-            $(".arcvigil-task-toggle-btn").on("click", async function() {
+            // 绑定禁用/恢复状态切换按钮（云端禁用）
+            $(".arcvigil-task-toggle-btn:not(.disabled)").on("click", async function() {
                 const taskId = $(this).data("id");
                 try {
                     const toggleRes = await fetch(`${url}/api/tasks/${taskId}/toggle`, { method: 'POST' });
@@ -597,12 +886,15 @@ async function updateTaskRadar() {
                         toastr.info(`ArcViGil: 任务已${isNowPaused ? '禁用/暂停' : '恢复启用'}`);
                         updateTaskRadar();
                     } else {
-                        toastr.error("ArcViGil: 切换任务状态失败");
+                        toastr.warning(toggleData.message || "ArcViGil: 切换任务状态失败（云端任务不支持暂停）");
                     }
                 } catch (e) {
                     console.error("[ArcViGil] toggle task error:", e);
                     toastr.error("ArcViGil: 请求失败，请确认后端已启动");
                 }
+            });
+            $(".arcvigil-task-toggle-btn.disabled").on("click", function() {
+                toastr.warning("ArcViGil: 云端定时任务不支持暂停（Resend取消后不可恢复），如需取消请点删除");
             });
 
             // 绑定测试按钮事件
@@ -663,14 +955,37 @@ async function updateTaskRadar() {
         // 渲染已保存的设置到表单
         renderSettings();
 
-        // ---- 模式切换 ----
+        // ---- 调度模式切换（带反馈） ----
+        $(".arcvigil-schedule-tab").on("click", function() {
+            const $self = $(this);
+            if ($self.hasClass("active")) {
+                // 已选中，仍给轻微反馈
+                $self.addClass("pulse");
+                setTimeout(() => $self.removeClass("pulse"), 360);
+                return;
+            }
+            $(".arcvigil-schedule-tab").removeClass("active pulse");
+            $self.addClass("active pulse");
+            setTimeout(() => $self.removeClass("pulse"), 380);
+            const sched = $self.data("schedule");
+            applyScheduleModeUI(sched, true);
+            autoSaveSettings();
+        });
+        // ---- 发信模式切换（同款脉冲 + 提示） ----
         $(".arcvigil-mode-tab").on("click", function() {
+            const $self = $(this);
+            if ($self.hasClass("active")) return;
             $(".arcvigil-mode-tab").removeClass("active");
-            $(this).addClass("active");
-            const mode = $(this).data("mode");
+            $self.addClass("active");
+            const mode = $self.data("mode");
             $("#arcvigil-panel-resend, #arcvigil-panel-smtp").hide();
             $(`#arcvigil-panel-${mode}`).show();
+            // SMTP 下云端提示更新
+            const schedNow = $(".arcvigil-schedule-tab.active").data("schedule") || "local";
+            applyScheduleModeUI(schedNow, false);
             autoSaveSettings();
+            if (mode === "resend") toastr.info("已切至 Resend API（推荐，绕过端口封锁）");
+            else toastr.info("已切至 SMTP（需端口畅通）");
         });
 
         // ---- 滑块 & 数字框双向联动 ----
@@ -751,6 +1066,9 @@ async function updateTaskRadar() {
 
         // ---- Soul 列表刷新 ----
         $("#arcvigil-soul-refresh-btn").on("click", refreshSoulList);
+
+        // ---- 表情列表刷新 ----
+        $("#arcvigil-sticker-refresh-btn").on("click", refreshStickerList);
 
         // ---- 信件存档刷新 ----
         $("#arcvigil-letters-refresh-btn").on("click", refreshLetterList);
@@ -849,11 +1167,12 @@ async function updateTaskRadar() {
         heartbeatInterval = setInterval(sendHeartbeat, 15000);
         sendHeartbeat();
 
-        // ---- 初始刷新任务雷达 + Soul列表 + 信件存档 ----
+        // ---- 初始刷新任务雷达 + Soul列表 + 信件存档 + 表情 ----
         setTimeout(() => {
             updateTaskRadar();
             refreshSoulList();
             refreshLetterList();
+            refreshStickerList();
         }, 1500);
 
         console.log("[ArcViGil] 初始化完成 ✓");
