@@ -83,6 +83,12 @@ def init_db():
             c.execute(f"ALTER TABLE tasks ADD COLUMN {col} TEXT DEFAULT {default}")
         except Exception:
             pass
+    # 迁移：tasks 重试机制相关列
+    for col, ddl in [("retry_count", "INTEGER DEFAULT 0"), ("last_error", "TEXT DEFAULT ''"), ("next_retry_at", "REAL DEFAULT 0")]:
+        try:
+            c.execute(f"ALTER TABLE tasks ADD COLUMN {col} {ddl}")
+        except Exception:
+            pass
     conn.commit()
     conn.close()
 
@@ -238,17 +244,22 @@ async def schedule_tasks(request: Request):
 
 @app.get("/api/tasks")
 async def get_tasks():
-    """供前端获取当前任务雷达（包含 pending / paused / scheduled_remote 云端）"""
+    """供前端获取当前任务雷达（包含 pending / paused / scheduled_remote 云端 + failed 重试耗尽）"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     try:
-        c.execute("SELECT id, participants, delay_hours, topic, trigger_at, status, resend_email_id, schedule_mode FROM tasks WHERE status IN ('pending', 'paused', 'scheduled_remote') ORDER BY trigger_at ASC")
+        c.execute("SELECT id, participants, delay_hours, topic, trigger_at, status, resend_email_id, schedule_mode, retry_count, last_error FROM tasks WHERE status IN ('pending', 'paused', 'scheduled_remote', 'failed') ORDER BY trigger_at ASC")
         rows = c.fetchall()
     except Exception:
         # 兼容未迁移的旧表
-        c.execute("SELECT id, participants, delay_hours, topic, trigger_at, status FROM tasks WHERE status IN ('pending', 'paused', 'scheduled_remote') ORDER BY trigger_at ASC")
-        rows = c.fetchall()
-        rows = [(r[0], r[1], r[2], r[3], r[4], r[5], "", "local") for r in rows]
+        try:
+            c.execute("SELECT id, participants, delay_hours, topic, trigger_at, status, resend_email_id, schedule_mode FROM tasks WHERE status IN ('pending', 'paused', 'scheduled_remote', 'failed') ORDER BY trigger_at ASC")
+            rows = c.fetchall()
+            rows = [(r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], 0, "") for r in rows]
+        except Exception:
+            c.execute("SELECT id, participants, delay_hours, topic, trigger_at, status FROM tasks WHERE status IN ('pending', 'paused', 'scheduled_remote', 'failed') ORDER BY trigger_at ASC")
+            rows = c.fetchall()
+            rows = [(r[0], r[1], r[2], r[3], r[4], r[5], "", "local", 0, "") for r in rows]
     conn.close()
     
     tasks = []
@@ -261,13 +272,15 @@ async def get_tasks():
             "trigger_at": r[4],
             "status": r[5],
             "resend_email_id": r[6] if len(r) > 6 else "",
-            "schedule_mode": r[7] if len(r) > 7 else "local"
+            "schedule_mode": r[7] if len(r) > 7 else "local",
+            "retry_count": r[8] if len(r) > 8 and r[8] is not None else 0,
+            "last_error": r[9] if len(r) > 9 and r[9] else ""
         })
     return {"status": "ok", "tasks": tasks}
 
 @app.delete("/api/tasks/{task_id}")
 async def delete_task(task_id: int):
-    """手动删除指定的待执行计划任务（云端任务会同步取消 Resend）"""
+    """手动删除指定的待执行计划任务（云端任务会同步取消 Resend，failed 也允许删除）"""
     import scheduler
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -285,7 +298,7 @@ async def delete_task(task_id: int):
         except Exception as e:
             print(f"[Delete] 取消 Resend 异常 {e}")
 
-    c.execute("DELETE FROM tasks WHERE id = ? AND status IN ('pending', 'paused', 'scheduled_remote')", (task_id,))
+    c.execute("DELETE FROM tasks WHERE id = ? AND status IN ('pending', 'paused', 'scheduled_remote', 'failed')", (task_id,))
     deleted = c.rowcount > 0
     conn.commit()
     conn.close()
@@ -293,6 +306,28 @@ async def delete_task(task_id: int):
         return {"status": "ok", "message": "Task deleted"}
     else:
         return {"status": "error", "message": "Task not found or already completed"}
+
+@app.post("/api/tasks/{task_id}/retry")
+async def retry_failed_task(task_id: int):
+    """手动重试一个已失败的任务：重置为 pending，1秒后可被调度器重新执行"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT status FROM tasks WHERE id=?", (task_id,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return {"status": "error", "message": "Task not found"}
+    if row[0] != "failed":
+        conn.close()
+        return {"status": "error", "message": f"仅 failed 状态可重试，当前为 {row[0]}"}
+    now = time.time()
+    try:
+        c.execute("UPDATE tasks SET status='pending', trigger_at=?, retry_count=0, last_error='' WHERE id=?", (now, task_id))
+    except Exception:
+        c.execute("UPDATE tasks SET status='pending', trigger_at=? WHERE id=?", (now, task_id))
+    conn.commit()
+    conn.close()
+    return {"status": "ok", "message": "Task retried", "trigger_at": now}
 
 @app.post("/api/tasks/{task_id}/toggle")
 async def toggle_task_status(task_id: int):
@@ -370,6 +405,87 @@ async def list_souls():
                     "modified_at": stat.st_mtime,
                 })
     return {"status": "ok", "souls": souls}
+
+def _safe_soul_path(filename: str) -> str:
+    # 防止路径穿越，只允许单文件名
+    fname = os.path.basename(str(filename or "").strip())
+    if not fname:
+        raise ValueError("filename 不能为空")
+    # 限制扩展名
+    base_dir = os.path.abspath(SOULS_DIR)
+    os.makedirs(base_dir, exist_ok=True)
+    full = os.path.abspath(os.path.join(base_dir, fname))
+    if not full.startswith(base_dir + os.sep) and full != base_dir:
+        raise ValueError("非法路径")
+    return full
+
+class SoulWrite(BaseModel):
+    filename: str
+    content: str
+    name: Optional[str] = None
+
+@app.get("/api/souls/{filename}")
+async def read_soul(filename: str):
+    """读取单個 Soul 原文 — 供 ArcHarness 单向同步 EX→ViGil"""
+    try:
+        full = _safe_soul_path(filename)
+    except ValueError as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=str(e))
+    if not os.path.isfile(full):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Soul not found")
+    from fastapi.responses import PlainTextResponse
+    try:
+        with open(full, "r", encoding="utf-8") as f:
+            txt = f.read()
+    except UnicodeDecodeError:
+        with open(full, "r", encoding="utf-8", errors="ignore") as f:
+            txt = f.read()
+    return PlainTextResponse(txt, media_type="text/plain; charset=utf-8")
+
+@app.post("/api/souls/write")
+async def write_soul(payload: SoulWrite):
+    """写入/覆盖单個 Soul — ArcHarness EX→ViGil 单向同步"""
+    try:
+        full = _safe_soul_path(payload.filename)
+    except ValueError as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=str(e))
+    # 写入
+    with open(full, "w", encoding="utf-8") as f:
+        f.write(payload.content or "")
+    stat = os.stat(full)
+    return {"status": "ok", "filename": os.path.basename(full), "size_bytes": stat.st_size, "modified_at": stat.st_mtime}
+
+@app.post("/api/souls")
+async def create_soul_alias(payload: SoulWrite):
+    """兼容别名: POST /api/souls 同 write"""
+    return await write_soul(payload)
+
+@app.put("/api/souls/{filename}")
+async def put_soul(filename: str, request: Request):
+    """兼容别名: PUT /api/souls/{filename} 支持 text/plain 或 json"""
+    ct = request.headers.get("content-type", "")
+    if "application/json" in ct:
+        data = await request.json()
+        content = data.get("content", "")
+    else:
+        raw = await request.body()
+        try:
+            content = raw.decode("utf-8")
+        except:
+            content = raw.decode("utf-8", errors="ignore")
+        # 若 body 是 json 字符串包裹
+        if content.strip().startswith("{"):
+            try:
+                j = json.loads(content)
+                if isinstance(j, dict) and "content" in j:
+                    content = j["content"]
+            except:
+                pass
+    payload = SoulWrite(filename=filename, content=content)
+    return await write_soul(payload)
 
 @app.get("/api/stickers")
 async def list_stickers():

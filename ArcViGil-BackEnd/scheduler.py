@@ -234,6 +234,58 @@ def normalize_api_base(url: str) -> str:
             break
     return stripped
 
+def _get_timeout(config, key, default):
+    """从 config 读取超时，兼容字符串/缺失/非法值，返回 int 秒"""
+    try:
+        v = config.get(key, str(default))
+        # 允许 "300" 或 300
+        iv = int(float(str(v).strip()))
+        # 钳位 10~600s，避免误填 0 导致立即超时
+        if iv < 10:
+            iv = 10
+        if iv > 600:
+            iv = 600
+        return iv
+    except Exception:
+        return default
+
+def _get_int(config, key, default, min_v=None, max_v=None):
+    try:
+        v = config.get(key, str(default))
+        iv = int(float(str(v).strip()))
+        if min_v is not None and iv < min_v:
+            iv = min_v
+        if max_v is not None and iv > max_v:
+            iv = max_v
+        return iv
+    except Exception:
+        return default
+
+def _is_failure_content(content, topic=""):
+    """判断是否为占位失败内容：空、或包含‘虚空中’/‘系统异常’"""
+    if not content or not content.strip():
+        return True, "empty_content"
+    if "虚空中" in content or "系统异常" in content:
+        return True, "placeholder_虚空中"
+    # 有时模型返回过短（<5字）也视为异常，可按需放宽
+    if len(content.strip()) < 5:
+        return True, "too_short"
+    return False, ""
+
+def _ensure_task_retry_columns(conn):
+    """确保 tasks 表包含重试相关列，旧库自动迁移"""
+    c = conn.cursor()
+    for col, ddl in [
+        ("retry_count", "INTEGER DEFAULT 0"),
+        ("last_error", "TEXT DEFAULT ''"),
+        ("next_retry_at", "REAL DEFAULT 0"),
+    ]:
+        try:
+            c.execute(f"ALTER TABLE tasks ADD COLUMN {col} {ddl}")
+        except Exception:
+            pass
+    # status 列无需迁移，已支持任意文本
+
 def generate_email_content(topic, participants, chat_context_past, chat_context_now, config):
     """独立调用大模型生成信件内容，支持从 config 读取提示词模板和所有生成参数"""
     api_url   = normalize_api_base(config.get("apiUrl", "https://api.openai.com/v1"))
@@ -284,14 +336,15 @@ def generate_email_content(topic, participants, chat_context_past, chat_context_
     if top_k > 0:
         payload["top_k"] = top_k
 
+    timeout = _get_timeout(config, "requestTimeout", 300)
     print(f"[Scheduler] 为 {participants} 调用模型生成关于 '{topic}' 的邮件 "
-          f"(temp={payload['temperature']}, top_p={payload['top_p']}, max_tokens={payload['max_tokens']})...")
+          f"(temp={payload['temperature']}, top_p={payload['top_p']}, max_tokens={payload['max_tokens']}, timeout={timeout}s)...")
     try:
         res = requests.post(
             f"{api_url}/chat/completions",
             headers=headers,
             json=payload,
-            timeout=60,
+            timeout=timeout,
         )
         res.raise_for_status()
         return res.json()["choices"][0]["message"]["content"].strip()
@@ -343,13 +396,19 @@ def generate_summary(content, participants_str, config):
         "max_tokens": max_tokens,
     }
 
-    print(f"[Scheduler] 为 {participants_str} 生成摘要 (model={api_model})...")
+    # 摘要超时：优先使用独立配置 summaryTimeout，否则复用 requestTimeout，再兜底 60s
+    summary_timeout = _get_timeout(config, "summaryTimeout", _get_timeout(config, "requestTimeout", 300) if config.get("summaryUseMainLLM", "true") == "true" else 60)
+    # 若 summaryTimeout 未单独配置且复用主 LLM，适当钳位避免摘要也占满 300s
+    if "summaryTimeout" not in config and config.get("summaryUseMainLLM", "true") == "true":
+        # 摘要通常短，给主超时的 1/3，但不少于 60
+        summary_timeout = max(60, min(summary_timeout, 120))
+    print(f"[Scheduler] 为 {participants_str} 生成摘要 (model={api_model}, timeout={summary_timeout}s)...")
     try:
         res = requests.post(
             f"{api_url}/chat/completions",
             headers=headers,
             json=payload,
-            timeout=30,
+            timeout=summary_timeout,
         )
         res.raise_for_status()
         summary = res.json()["choices"][0]["message"]["content"].strip()
@@ -582,12 +641,49 @@ def send_email(content, topic, participants, config, attachments=None):
     else:
         return send_smtp_email(content, topic, participants, config, attachments)
 
+def _handle_task_failure(conn, task_id, error_msg, config):
+    """通用失败处理：未达最大重试 -> 1min后重试；达上限 -> 标记 failed"""
+    _ensure_task_retry_columns(conn)
+    c = conn.cursor()
+    # 读取当前重试次数
+    try:
+        c.execute("SELECT retry_count FROM tasks WHERE id=?", (task_id,))
+        row = c.fetchone()
+        retry_count = int(row[0]) if row and row[0] is not None else 0
+    except Exception:
+        retry_count = 0
+    max_retries = _get_int(config, "maxRetries", 3, 0, 20)
+    retry_delay = _get_int(config, "retryDelaySeconds", 60, 10, 3600)
+
+    if retry_count < max_retries:
+        new_count = retry_count + 1
+        next_trigger = time.time() + retry_delay
+        try:
+            c.execute("UPDATE tasks SET retry_count=?, last_error=?, trigger_at=?, next_retry_at=?, status='pending' WHERE id=?",
+                      (new_count, str(error_msg)[:500], next_trigger, next_trigger, task_id))
+        except Exception as e:
+            # 兼容旧表（列缺失时仅更新 trigger_at）
+            print(f"[Scheduler] 重试列更新失败，降级仅更新 trigger_at: {e}")
+            c.execute("UPDATE tasks SET trigger_at=? WHERE id=?", (next_trigger, task_id))
+        conn.commit()
+        print(f"[Scheduler] 任务 {task_id} 失败 [{error_msg}]，{retry_delay}s 后重试 ({new_count}/{max_retries}) -> {time.ctime(next_trigger)}")
+        return False  # 未彻底失败，等待重试
+    else:
+        try:
+            c.execute("UPDATE tasks SET status='failed', last_error=? WHERE id=?", (str(error_msg)[:500], task_id))
+        except Exception:
+            c.execute("UPDATE tasks SET status='failed' WHERE id=?", (task_id,))
+        conn.commit()
+        print(f"[Scheduler] 任务 {task_id} 重试 {max_retries} 次仍失败，标记为 failed: {error_msg}。请检查 API/网络或在任务雷达手动重试。")
+        return True  # 已标记 failed
+
 def process_due_tasks():
     conn = sqlite3.connect(DB_PATH)
+    _ensure_task_retry_columns(conn)
     c = conn.cursor()
     now = time.time()
     
-    # 查找所有到期且未执行的任务
+    # 查找所有到期且未执行的任务（pending 包含初次及重试）
     c.execute("SELECT id, participants, topic, chat_context, chat_context_past FROM tasks WHERE status='pending' AND trigger_at <= ?", (now,))
     due_tasks = c.fetchall()
     
@@ -609,14 +705,26 @@ def process_due_tasks():
         # 1. 生成内容（past 冻结 + now 动态，now 受 autoSyncContext 总开关控制）
         content = generate_email_content(topic, participants, chat_context_past, chat_context, config)
 
-        # 1.5 解析表情标记 → 剥离正文 + 收集附件
+        # 1.5 检测生成失败（占位/空内容） -> 重试
+        is_fail, reason = _is_failure_content(content, topic)
+        if is_fail:
+            err = f"LLM生成失败:{reason}"
+            print(f"[Scheduler] 任务 {task_id} 内容检测失败 {reason}: {content[:80]}")
+            _handle_task_failure(conn, task_id, err, config)
+            continue
+
+        # 1.6 解析表情标记 → 剥离正文 + 收集附件
         content, attachments = resolve_stickers(content)
         attachment_names = [os.path.basename(p) for p in attachments]
 
-        # 2. 发送邮件 (自动根据 emailMethod 配置选择 SMTP 或 Resend)
-        send_email(content, topic, participants, config, attachments)
+        # 2. 发送邮件 (自动根据 emailMethod 配置选择 SMTP 或 Resend) -> 失败则重试
+        ok = send_email(content, topic, participants, config, attachments)
+        if not ok:
+            err = "邮件发送失败(Resend/SMTP)"
+            _handle_task_failure(conn, task_id, err, config)
+            continue
         
-        # 3. 生成摘要（70-100字），失败静默留空
+        # 3. 生成摘要（70-100字），失败静默留空（不影响主流程）
         sender_name = " & ".join(participants)
         summary = generate_summary(content, sender_name, config) if content else ""
 
@@ -627,9 +735,13 @@ def process_due_tasks():
             (subject, content, sender_name, time.time(), summary, json.dumps(attachment_names))
         )
         
-        # 5. 标记任务完成
-        c.execute("UPDATE tasks SET status='completed' WHERE id=?", (task_id,))
+        # 5. 标记任务完成，并清零重试信息
+        try:
+            c.execute("UPDATE tasks SET status='completed', retry_count=0, last_error='' WHERE id=?", (task_id,))
+        except Exception:
+            c.execute("UPDATE tasks SET status='completed' WHERE id=?", (task_id,))
         conn.commit()
+        print(f"[Scheduler] 任务 {task_id} 完成，已入库 messages")
 
     conn.close()
 

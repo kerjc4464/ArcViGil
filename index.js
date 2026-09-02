@@ -33,6 +33,7 @@ const defaultSettings = {
     topP:               1.0,
     topK:               0,
     maxTokens:          1024,
+    requestTimeout:     300,   // LLM 请求超时（秒），后端 scheduler 使用，默认 300s
     // 发信模式
     emailMethod:        "resend",
     // 调度模式：local = 传统24*7惰性生成, resend_scheduled = Resend云端定时（创建时生成，到点注入）
@@ -72,6 +73,9 @@ const defaultSettings = {
     summaryPromptTemplate: "",    // 空=使用后端内置默认
     // 动态同步上下文设置
     autoSyncContext:    false,    // 动态同步最新上下文到待执行任务（云端模式强制关闭）
+    // 失败重试设置
+    maxRetries:         3,       // LLM/邮件失败后最多重试次数，0=不重试
+    retryDelaySeconds:  60,      // 每次重试间隔（秒），默认 60s
 };
 
 let heartbeatInterval = null;
@@ -147,6 +151,7 @@ function saveSettings() {
     s.topP           = Number($("#arcvigil-top-p").val());
     s.topK           = Number($("#arcvigil-top-k").val());
     s.maxTokens      = Number($("#arcvigil-max-tokens").val());
+    s.requestTimeout = Math.max(10, Math.min(600, Number($("#arcvigil-request-timeout").val()) || 300));
     // 调度模式
     s.scheduleMode   = $(".arcvigil-schedule-tab.active").data("schedule") || "local";
     // 发信模式
@@ -193,6 +198,9 @@ function saveSettings() {
     } else {
         s.autoSyncContext   = $("#arcvigil-auto-sync-context").prop("checked");
     }
+    // 失败重试
+    s.maxRetries        = Math.max(0, Math.min(20, Number($("#arcvigil-max-retries").val()) || 3));
+    s.retryDelaySeconds = Math.max(10, Math.min(3600, Number($("#arcvigil-retry-delay").val()) || 60));
     // 持久化到磁盘，页面刷新后设置不丢失
     saveSettingsDebounced();
 }
@@ -208,6 +216,7 @@ function renderSettings() {
     setSliderPair("arcvigil-top-p",       s.topP);
     setSliderPair("arcvigil-top-k",       s.topK);
     setSliderPair("arcvigil-max-tokens",  s.maxTokens);
+    setSliderPair("arcvigil-request-timeout", s.requestTimeout ?? 300);
     // 调度模式
     const sched = s.scheduleMode || "local";
     $(".arcvigil-schedule-tab").removeClass("active");
@@ -258,6 +267,8 @@ function renderSettings() {
     // 摘要自定义面板默认折叠 — 由 init 中的 toggleSummaryCustomPanel 统一处理
     // 动态同步上下文
     $("#arcvigil-auto-sync-context").prop("checked", s.autoSyncContext ?? false);
+    $("#arcvigil-max-retries").val(s.maxRetries ?? 3);
+    $("#arcvigil-retry-delay").val(s.retryDelaySeconds ?? 60);
     applyScheduleModeUI(s.scheduleMode || "local");
 }
 
@@ -847,25 +858,41 @@ async function updateTaskRadar() {
                 const names = JSON.parse(t.participants).join(", ");
                 const isPaused = t.status === 'paused';
                 const isCloud = t.status === 'scheduled_remote' || t.schedule_mode === 'resend_scheduled';
-                const opacityStyle = isPaused ? "opacity: 0.55; border-left-color: #6b7280;" : (isCloud ? "border-left-color:#a78bfa;" : "");
+                const isFailed = t.status === 'failed';
+                const retryCount = t.retry_count ?? 0;
+                const lastError = t.last_error || "";
+                let opacityStyle = "";
+                if (isFailed) opacityStyle = "opacity: 0.9; border-left-color: #ef4444; background: rgba(239,68,68,0.06);";
+                else if (isPaused) opacityStyle = "opacity: 0.55; border-left-color: #6b7280;";
+                else if (isCloud) opacityStyle = "border-left-color:#a78bfa;";
                 let badgeHtml = "";
-                if (isPaused) {
+                if (isFailed) {
+                    badgeHtml = `<span style="font-size:10px; color:#ef4444; background:rgba(239,68,68,0.15); padding:1px 5px; border-radius:3px; margin-left:6px; font-weight:normal;">❌ 失败/待重试 (${retryCount})</span>`;
+                } else if (isPaused) {
                     badgeHtml = `<span style="font-size:10px; color:#f59e0b; background:rgba(245,158,11,0.15); padding:1px 5px; border-radius:3px; margin-left:6px; font-weight:normal;">已禁用/归档</span>`;
                 } else if (isCloud) {
                     badgeHtml = `<span style="font-size:10px; color:#a78bfa; background:rgba(167,139,250,0.15); padding:1px 5px; border-radius:3px; margin-left:6px; font-weight:normal;">☁️ 云端定时</span>`;
+                } else if (retryCount > 0) {
+                    badgeHtml = `<span style="font-size:10px; color:#f59e0b; background:rgba(245,158,11,0.15); padding:1px 5px; border-radius:3px; margin-left:6px; font-weight:normal;">🔄 重试中 ${retryCount}</span>`;
                 }
-                const toggleIcon = isCloud
-                    ? `<i class="fa-solid fa-ban arcvigil-task-toggle-btn disabled" data-id="${t.id}" title="云端任务不支持暂停（取消后不可恢复，请直接删除）" style="color:#6b7280; cursor:not-allowed; padding: 5px; opacity:0.45;"></i>`
-                    : isPaused
-                    ? `<i class="fa-solid fa-play arcvigil-task-toggle-btn" data-id="${t.id}" title="点击恢复启用此任务" style="color:#34d399; cursor:pointer; padding: 5px;"></i>`
-                    : `<i class="fa-solid fa-pause arcvigil-task-toggle-btn" data-id="${t.id}" title="点击禁用/暂停此任务（暂停后不会自动触发发信）" style="color:#f59e0b; cursor:pointer; padding: 5px;"></i>`;
+                let toggleIcon = "";
+                if (isFailed) {
+                    toggleIcon = `<i class="fa-solid fa-rotate arcvigil-task-retry-btn" data-id="${t.id}" title="重试此失败任务（立即重置为 pending）" style="color:#22c55e; cursor:pointer; padding: 5px;"></i>`;
+                } else if (isCloud) {
+                    toggleIcon = `<i class="fa-solid fa-ban arcvigil-task-toggle-btn disabled" data-id="${t.id}" title="云端任务不支持暂停（取消后不可恢复，请直接删除）" style="color:#6b7280; cursor:not-allowed; padding: 5px; opacity:0.45;"></i>`;
+                } else if (isPaused) {
+                    toggleIcon = `<i class="fa-solid fa-play arcvigil-task-toggle-btn" data-id="${t.id}" title="点击恢复启用此任务" style="color:#34d399; cursor:pointer; padding: 5px;"></i>`;
+                } else {
+                    toggleIcon = `<i class="fa-solid fa-pause arcvigil-task-toggle-btn" data-id="${t.id}" title="点击禁用/暂停此任务（暂停后不会自动触发发信）" style="color:#f59e0b; cursor:pointer; padding: 5px;"></i>`;
+                }
                 const cloudIdHint = isCloud && t.resend_email_id ? ` · Resend:${String(t.resend_email_id).slice(0,8)}…` : "";
+                const retryHint = isFailed ? ` <span style="color:#ef4444;">· 错误: ${lastError || '未知'} · 可点 ↻ 重试</span>` : (retryCount>0 ? ` <span style="color:#f59e0b;">· 已重试 ${retryCount} 次${lastError ? ' · 上次: '+lastError : ''}</span>` : "");
 
                 $list.append(`
                     <div class="arcvigil-task-item" style="display:flex; justify-content:space-between; align-items:center; ${opacityStyle}">
                         <div style="flex:1; min-width:0;">
                             <div class="task-title">${names} → ${t.topic}${badgeHtml}</div>
-                            <div class="task-meta">触发时间: ${dt}${cloudIdHint} ${isCloud ? '<span style="color:#a78bfa;">(到点云端直发，到点才注入)</span>' : ''}</div>
+                            <div class="task-meta">触发时间: ${dt}${cloudIdHint}${retryHint} ${isCloud ? '<span style="color:#a78bfa;">(到点云端直发，到点才注入)</span>' : ''}</div>
                         </div>
                         <div style="display:flex; gap:4px; align-items:center; flex-shrink:0;">
                             ${toggleIcon}
@@ -895,6 +922,25 @@ async function updateTaskRadar() {
             });
             $(".arcvigil-task-toggle-btn.disabled").on("click", function() {
                 toastr.warning("ArcViGil: 云端定时任务不支持暂停（Resend取消后不可恢复），如需取消请点删除");
+            });
+
+            // 绑定失败重试按钮
+            $(".arcvigil-task-retry-btn").on("click", async function() {
+                const taskId = $(this).data("id");
+                if (!confirm("确定要重试这个失败任务吗？将立即重置为待执行（调度器约 10s 内重跑，若仍失败会继续 1min 重试）")) return;
+                try {
+                    const r = await fetch(`${url}/api/tasks/${taskId}/retry`, { method: 'POST' });
+                    const d = await r.json();
+                    if (r.ok && d.status === "ok") {
+                        toastr.success("ArcViGil: 已重置为待执行，等待调度器重跑");
+                        updateTaskRadar();
+                    } else {
+                        toastr.error(d.message || "重试失败");
+                    }
+                } catch (e) {
+                    console.error("[ArcViGil] retry task error:", e);
+                    toastr.error("ArcViGil: 请求失败，请确认后端已启动");
+                }
             });
 
             // 绑定测试按钮事件
@@ -993,6 +1039,7 @@ async function updateTaskRadar() {
         bindSliderPair("arcvigil-top-p");
         bindSliderPair("arcvigil-top-k");
         bindSliderPair("arcvigil-max-tokens");
+        bindSliderPair("arcvigil-request-timeout");
 
         // ---- 自动保存：监听所有表单控件变化 ----
         $("#arcvigil-settings-container").on("input change", autoSaveSettings);
