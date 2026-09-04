@@ -1,5 +1,11 @@
 *.db
+*.db-shm
+*.db-wal
+*.db-journal
 *.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
 __pycache__/
 *.pyc
 ArcViGil-BackEnd/souls/
