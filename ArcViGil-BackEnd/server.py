@@ -29,12 +29,22 @@ DB_PATH = "database.db"
 SOULS_DIR = "souls"
 STICKERS_DIR = "stickers"
 
+def db():
+    """统一建连：busy 超时 + WAL，避免调度器与 API 并发时 'database is locked'。"""
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+    except Exception:
+        pass
+    return conn
+
 # 确保目录存在
 os.makedirs(SOULS_DIR, exist_ok=True)
 os.makedirs(STICKERS_DIR, exist_ok=True)
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = db()
     c = conn.cursor()
     # 配置表
     c.execute('''CREATE TABLE IF NOT EXISTS config (
@@ -108,7 +118,7 @@ async def heartbeat(request: Request):
 async def update_config(request: Request):
     """接收前端推送的全量配置（API Key、SMTP、后端地址等）"""
     data = await request.json()
-    conn = sqlite3.connect(DB_PATH)
+    conn = db()
     c = conn.cursor()
     for k, v in data.items():
         if isinstance(v, (dict, list)):
@@ -117,6 +127,28 @@ async def update_config(request: Request):
     conn.commit()
     conn.close()
     return {"status": "ok"}
+
+SECRET_KEYS = {"apiKey", "resendApiKey", "smtpPass", "summaryApiKey"}
+
+def _secret_fp(v):
+    """密钥指纹：只暴露长度+首尾各4位，绝不返回完整密钥，供前端对账用。"""
+    s = str(v or "")
+    if not s:
+        return {"set": False, "len": 0, "head": "", "tail": ""}
+    return {"set": True, "len": len(s), "head": s[:4], "tail": s[-4:]}
+
+@app.get("/api/config")
+async def read_config():
+    """回读后端真实配置（密钥仅给指纹），供前端做前后端一致性对账。
+
+    背景：自动保存是 fire-and-forget，推送那一下后端没收到就会永久分叉，
+    前端此前无任何手段发现。此接口让前端能显示"后端 Key: sk-X…XXXX(67位)".
+    """
+    import scheduler
+    config = scheduler.get_config()
+    public = {k: v for k, v in config.items() if k not in SECRET_KEYS}
+    secrets = {k: _secret_fp(config.get(k, "")) for k in SECRET_KEYS}
+    return {"status": "ok", "server_time": time.time(), "config": public, "secrets": secrets}
 
 @app.post("/api/schedule")
 async def schedule_tasks(request: Request):
@@ -141,7 +173,7 @@ async def schedule_tasks(request: Request):
         req_mode = req_mode.strip().lower()
     use_resend_scheduled = (req_mode == "resend_scheduled")
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = db()
     c = conn.cursor()
     now = time.time()
 
@@ -174,11 +206,21 @@ async def schedule_tasks(request: Request):
         if should_use_resend:
             # 立刻生成内容（autoSync已禁用，now_block为空）
             try:
-                content = scheduler.generate_email_content(topic, participants_raw, chat_context, "", config)
+                content, _gen_err = scheduler.generate_email_content_detailed(topic, participants_raw, chat_context, "", config)
+                if _gen_err:
+                    print(f"[Schedule] 生成内容告警 {_gen_err}: {topic}")
             except Exception as e:
                 print(f"[Schedule] 生成内容异常 {e}，回退本地: {topic}")
+                content, _gen_err = "", str(e)
                 should_use_resend = False
                 fallback_reason = f"生成失败:{e}"
+            else:
+                from scheduler import _is_failure_content as _chk
+                _bad, _why = _chk(content, topic)
+                if _bad:
+                    print(f"[Schedule] 生成内容检测失败 {_why}/{_gen_err}，回退本地: {topic}")
+                    should_use_resend = False
+                    fallback_reason = f"生成失败:{_gen_err or _why}"
 
         if should_use_resend:
             # 解析表情
@@ -245,7 +287,7 @@ async def schedule_tasks(request: Request):
 @app.get("/api/tasks")
 async def get_tasks():
     """供前端获取当前任务雷达（包含 pending / paused / scheduled_remote 云端 + failed 重试耗尽）"""
-    conn = sqlite3.connect(DB_PATH)
+    conn = db()
     c = conn.cursor()
     try:
         c.execute("SELECT id, participants, delay_hours, topic, trigger_at, status, resend_email_id, schedule_mode, retry_count, last_error FROM tasks WHERE status IN ('pending', 'paused', 'scheduled_remote', 'failed') ORDER BY trigger_at ASC")
@@ -282,7 +324,7 @@ async def get_tasks():
 async def delete_task(task_id: int):
     """手动删除指定的待执行计划任务（云端任务会同步取消 Resend，failed 也允许删除）"""
     import scheduler
-    conn = sqlite3.connect(DB_PATH)
+    conn = db()
     c = conn.cursor()
     # 先查是否为云端任务
     try:
@@ -310,7 +352,7 @@ async def delete_task(task_id: int):
 @app.post("/api/tasks/{task_id}/retry")
 async def retry_failed_task(task_id: int):
     """手动重试一个已失败的任务：重置为 pending，1秒后可被调度器重新执行"""
-    conn = sqlite3.connect(DB_PATH)
+    conn = db()
     c = conn.cursor()
     c.execute("SELECT status FROM tasks WHERE id=?", (task_id,))
     row = c.fetchone()
@@ -335,7 +377,7 @@ async def toggle_task_status(task_id: int):
 
     云端 scheduled_remote 不支持暂停（Resend 取消后不可恢复），返回错误提示前端。
     """
-    conn = sqlite3.connect(DB_PATH)
+    conn = db()
     c = conn.cursor()
     try:
         c.execute("SELECT status, schedule_mode FROM tasks WHERE id = ?", (task_id,))
@@ -376,7 +418,7 @@ async def update_tasks_context(request: Request):
     new_context = data.get("chat_context", "")
     if not new_context:
         return {"status": "error", "message": "chat_context 为空"}
-    conn = sqlite3.connect(DB_PATH)
+    conn = db()
     c = conn.cursor()
     c.execute(
         "UPDATE tasks SET chat_context = ? WHERE status = 'pending'",
@@ -511,7 +553,7 @@ async def sticker_image(folder: str = "", file: str = ""):
 @app.get("/api/pull_messages")
 async def pull_messages():
     """供前端拉取已发送但尚未投递邮箱的邮件（一次性标记）——已废弃，保留兼容"""
-    conn = sqlite3.connect(DB_PATH)
+    conn = db()
     c = conn.cursor()
     c.execute("SELECT id, subject, content, participants, created_at FROM messages WHERE synced_to_st=0")
     rows = c.fetchall()
@@ -535,7 +577,7 @@ async def get_messages(limit: int = 5, since: float = 0):
     时间门控：只返回 created_at <= now 的记录，确保云端定时（created_at=trigger_at 未来值）到点才注入。
     不修改任何字段，幂等安全。
     """
-    conn = sqlite3.connect(DB_PATH)
+    conn = db()
     c = conn.cursor()
     now = time.time()
     c.execute(
@@ -564,7 +606,7 @@ async def ack_messages():
     在 config 表里写入当前时间戳作为 inject_acked_at。
     前端下次拉 /api/messages 时带上这个时间戳，只会看到更新的信件。
     """
-    conn = sqlite3.connect(DB_PATH)
+    conn = db()
     c = conn.cursor()
     now = time.time()
     c.execute("INSERT OR REPLACE INTO config (key, value) VALUES ('inject_acked_at', ?)", (str(now),))
@@ -640,7 +682,7 @@ async def test_task(task_id: int):
     - 兼容 scheduled_remote 云端任务（同样走即时生成测试）
     """
     import scheduler
-    conn = sqlite3.connect(DB_PATH)
+    conn = db()
     c = conn.cursor()
     c.execute("SELECT participants, topic, chat_context, chat_context_past FROM tasks WHERE id=? AND status IN ('pending', 'paused', 'scheduled_remote')", (task_id,))
     row = c.fetchone()
@@ -655,7 +697,9 @@ async def test_task(task_id: int):
     config = scheduler.get_config()
 
     # 生成内容
-    content = scheduler.generate_email_content(topic, participants, chat_context_past, chat_context, config)
+    content, _gen_err = scheduler.generate_email_content_detailed(topic, participants, chat_context_past, chat_context, config)
+    if _gen_err:
+        print(f"[Test] 生成告警 {_gen_err} task={task_id}")
 
     # 解析表情标记 → 剥离正文 + 收集附件
     content, attachments = scheduler.resolve_stickers(content)

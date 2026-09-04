@@ -23,6 +23,11 @@
                     <input type="text" id="arcvigil-backend-url" class="text_pole" placeholder="http://127.0.0.1:9000" />
                 </div>
                 <div class="arcvigil-form-group">
+                    <label>配置同步状态</label>
+                    <div id="arcvigil-config-sync" class="arcvigil-sync-badge unknown">对账中…</div>
+                    <div class="arcvigil-param-hint">对比本地 Key 与后端真实 Key 指纹；改 key 后若显示不一致请点“保存配置到后端”。后端重连时会自动补推一次。</div>
+                </div>
+                <div class="arcvigil-form-group">
                     <label for="arcvigil-api-key">LLM API Key (供后端使用)</label>
                     <input type="password" id="arcvigil-api-key" class="text_pole" placeholder="sk-..." />
                 </div>

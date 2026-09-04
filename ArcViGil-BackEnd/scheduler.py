@@ -3,6 +3,7 @@ import time
 import json
 import os
 import re
+import string
 import base64
 import mimetypes
 import smtplib
@@ -18,6 +19,19 @@ MAX_STICKERS_PER_EMAIL = 10  # 每封邮件表情附件软上限（邮箱服务�
 
 os.makedirs(STICKERS_DIR, exist_ok=True)
 
+def connect_db():
+    """统一建连：busy 超时 + WAL，避免单任务异常泄漏连接后整库 'database is locked' 卡死。
+
+    调用方仍需在 finally 里 close()，本函数只保证等待锁而不是立刻抛错。
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+    except Exception:
+        pass
+    return conn
+
 # 支持的图片格式（附件型，电子邮件客户端普遍兼容 png/jpg/gif）
 STICKER_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
 # 同名多格式时的优先级（数字越小越优先，png/jpg 优先于 gif/webp）
@@ -25,7 +39,7 @@ STICKER_EXT_PRIORITY = {'.png': 0, '.jpg': 0, '.jpeg': 0, '.gif': 1, '.webp': 1,
 
 def get_config():
     """获取所有前端配置"""
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect_db()
     c = conn.cursor()
     try:
         c.execute("SELECT key, value FROM config")
@@ -286,33 +300,86 @@ def _ensure_task_retry_columns(conn):
             pass
     # status 列无需迁移，已支持任意文本
 
-def generate_email_content(topic, participants, chat_context_past, chat_context_now, config):
-    """独立调用大模型生成信件内容，支持从 config 读取提示词模板和所有生成参数"""
-    api_url   = normalize_api_base(config.get("apiUrl", "https://api.openai.com/v1"))
-    api_key   = config.get("apiKey",   "")
+def safe_format(template, **kwargs):
+    """安全渲染提示词模板：未知 {占位符} 原样保留，不抛 KeyError。
+
+    背景：用户自定义模板里一旦出现示例 JSON 的 {…}，str.format 会 KeyError，
+    而该异常在调度循环里未被隔离，会 abort 整批任务并泄漏 SQLite 连接。
+    """
+    fmt = string.Formatter()
+    out = []
+    for literal, field, spec, conv in fmt.parse(template):
+        out.append(literal)
+        if field is None:
+            continue
+        if field == "":
+            out.append("{}")
+            continue
+        if field in kwargs:
+            v = kwargs[field]
+            try:
+                if conv:
+                    v = fmt.convert_field(v, conv)
+                out.append(fmt.format_field(v, spec))
+            except Exception:
+                out.append(str(v))
+        else:
+            piece = "{" + field
+            if conv:
+                piece += "!" + conv
+            if spec:
+                piece += ":" + spec
+            piece += "}"
+            out.append(piece)
+    return "".join(out)
+
+
+def _placeholder(topic):
+    return f"(由于系统异常，这封关于 {topic} 的信件丢失在了虚空中...)"
+
+
+def generate_email_content_detailed(topic, participants, chat_context_past, chat_context_now, config):
+    """带精确错误码的生成函数，返回 (content, error)。
+
+    error 为空字符串表示成功；失败时 content 为占位文本或空串，
+    error 形如 LLM_HTTP401 / LLM_TIMEOUT_300s / LLM_CONN / LLM_EMPTY /
+    TEMPLATE_FORMAT / PARAM_INVALID / UNEXPECTED，一眼可区分 key 问题与模型问题。
+    """
+    api_url = normalize_api_base(config.get("apiUrl", "https://api.openai.com/v1") or "https://api.openai.com/v1")
+    api_key = config.get("apiKey", "")
     api_model = config.get("apiModel", "gpt-4o")
 
     # 从 DB 读取提示词模板，若未设置则用内置默认值
-    prompt_template = config.get("promptTemplate", "").strip() or DEFAULT_PROMPT_TEMPLATE
+    prompt_template = (config.get("promptTemplate", "") or "").strip() or DEFAULT_PROMPT_TEMPLATE
 
-    souls_content = load_souls(participants)
-    stickers_block = load_sticker_catalog()
+    try:
+        souls_content = load_souls(participants)
+    except Exception as e:
+        return ("", f"SOUL_LOAD:{type(e).__name__}:{e}"[:300])
+    try:
+        stickers_block = load_sticker_catalog()
+    except Exception:
+        stickers_block = ""
 
     # History(now) 总开关：关闭动态同步时，既不更新也不注入最新聊天记录
     auto_sync = config.get("autoSyncContext", "false") == "true"
     now_context = chat_context_now if (auto_sync and chat_context_now) else ""
     now_block = f"【从决定发信到现在的聊天记录】（这段时间发生了什么）：\n{now_context}" if now_context else ""
 
-    # 用占位符渲染最终提示词
+    # 用占位符渲染最终提示词（安全版：未知占位符保留原文）
     # {chat_context} 保留为 History(now) 的别名，兼容旧的自定义模板
-    system_prompt = prompt_template.format(
-        souls=souls_content,
-        chat_context_past=chat_context_past or "",
-        chat_context=now_context,
-        chat_context_now_block=now_block,
-        topic=topic,
-        stickers=stickers_block,
-    )
+    try:
+        system_prompt = safe_format(
+            prompt_template,
+            souls=souls_content,
+            chat_context_past=chat_context_past or "",
+            chat_context=now_context,
+            chat_context_now_block=now_block,
+            topic=topic,
+            stickers=stickers_block,
+        )
+    except Exception as e:
+        return ("", f"TEMPLATE_FORMAT:{type(e).__name__}:{e}"[:300])
     # 自定义模板若未使用 {stickers} 占位符，自动把表情目录追加到末尾，保证功能可用
     if "{stickers}" not in prompt_template and stickers_block:
         system_prompt += "\n\n" + stickers_block
@@ -323,16 +390,19 @@ def generate_email_content(topic, participants, chat_context_past, chat_context_
     }
 
     # 组装生成参数，从 config 读取，提供合理默认值
-    payload = {
-        "model": api_model,
-        "messages": [{"role": "system", "content": system_prompt}],
-        "temperature": float(config.get("temperature", 0.7)),
-        "top_p":       float(config.get("topP",        1.0)),
-        "max_tokens":  int(config.get("maxTokens",     1024)),
-    }
+    try:
+        payload = {
+            "model": api_model,
+            "messages": [{"role": "system", "content": system_prompt}],
+            "temperature": float(config.get("temperature", 0.7)),
+            "top_p":       float(config.get("topP",        1.0)),
+            "max_tokens":  int(float(str(config.get("maxTokens", 1024)))),
+        }
+        top_k = int(float(str(config.get("topK", 0))))
+    except Exception as e:
+        return ("", f"PARAM_INVALID:{type(e).__name__}:{e}"[:300])
 
     # top_k 仅在非零时加入（OpenAI 不支持，Ollama/KoboldCPP 等本地推理支持）
-    top_k = int(config.get("topK", 0))
     if top_k > 0:
         payload["top_k"] = top_k
 
@@ -347,10 +417,38 @@ def generate_email_content(topic, participants, chat_context_past, chat_context_
             timeout=timeout,
         )
         res.raise_for_status()
-        return res.json()["choices"][0]["message"]["content"].strip()
+    except requests.Timeout:
+        print(f"[Scheduler] 大模型调用超时 ({timeout}s)")
+        return (_placeholder(topic), f"LLM_TIMEOUT_{timeout}s")
+    except requests.HTTPError as e:
+        code = getattr(getattr(e, "response", None), "status_code", "?")
+        try:
+            body = (getattr(e, "response", None).text or "")[:150]
+        except Exception:
+            body = ""
+        print(f"[Scheduler] 大模型调用失败 HTTP {code}: {body}")
+        return (_placeholder(topic), f"LLM_HTTP{code}:{body}"[:300])
+    except requests.ConnectionError as e:
+        print(f"[Scheduler] 大模型连接失败: {e}")
+        return (_placeholder(topic), f"LLM_CONN:{e}"[:300])
     except Exception as e:
         print(f"[Scheduler] 大模型调用失败: {e}")
-        return f"(由于系统异常，这封关于 {topic} 的信件丢失在了虚空中...)"
+        return (_placeholder(topic), f"LLM_REQ:{type(e).__name__}:{e}"[:300])
+    try:
+        content = res.json()["choices"][0]["message"]["content"]
+    except Exception as e:
+        return (_placeholder(topic), f"LLM_PARSE:{type(e).__name__}:{e}"[:300])
+    if content is None or not str(content).strip():
+        return ("", "LLM_EMPTY:模型返回空内容")
+    return (str(content).strip(), "")
+
+
+def generate_email_content(topic, participants, chat_context_past, chat_context_now, config):
+    """独立调用大模型生成信件内容（兼容 wrapper，精确错误请用 detailed 版）"""
+    content, _ = generate_email_content_detailed(topic, participants, chat_context_past, chat_context_now, config)
+    if not content:
+        return _placeholder(topic)
+    return content
 
 
 DEFAULT_SUMMARY_PROMPT = """请用70到100字概括以下邮件内容，保留发信人身份和核心信息，
@@ -379,8 +477,8 @@ def generate_summary(content, participants_str, config):
         print("[Scheduler] 摘要生成跳过：缺少 API Key")
         return ""
 
-    prompt_template = config.get("summaryPromptTemplate", "").strip() or DEFAULT_SUMMARY_PROMPT
-    system_prompt = prompt_template.format(participants=participants_str, content=content)
+    prompt_template = (config.get("summaryPromptTemplate", "") or "").strip() or DEFAULT_SUMMARY_PROMPT
+    system_prompt = safe_format(prompt_template, participants=participants_str, content=content)
 
     temperature = float(config.get("summaryTemperature", 0.5))
     max_tokens  = int(config.get("summaryMaxTokens", 200))
@@ -414,8 +512,15 @@ def generate_summary(content, participants_str, config):
         summary = res.json()["choices"][0]["message"]["content"].strip()
         print(f"[Scheduler] 摘要生成完成 ({len(summary)}字): {summary[:60]}...")
         return summary
+    except requests.Timeout:
+        print(f"[Scheduler] 摘要生成超时 ({summary_timeout}s)")
+        return ""
+    except requests.HTTPError as e:
+        code = getattr(getattr(e, "response", None), "status_code", "?")
+        print(f"[Scheduler] 摘要生成失败 HTTP {code}: {e}")
+        return ""
     except Exception as e:
-        print(f"[Scheduler] 摘要生成失败: {e}")
+        print(f"[Scheduler] 摘要生成失败: {type(e).__name__}:{e}")
         return ""
 
 
@@ -678,72 +783,113 @@ def _handle_task_failure(conn, task_id, error_msg, config):
         return True  # 已标记 failed
 
 def process_due_tasks():
-    conn = sqlite3.connect(DB_PATH)
-    _ensure_task_retry_columns(conn)
-    c = conn.cursor()
-    now = time.time()
-    
-    # 查找所有到期且未执行的任务（pending 包含初次及重试）
-    c.execute("SELECT id, participants, topic, chat_context, chat_context_past FROM tasks WHERE status='pending' AND trigger_at <= ?", (now,))
-    due_tasks = c.fetchall()
-    
+    # 快照到期任务：短连接只读，读完即关，不持有写锁
+    try:
+        snap = connect_db()
+        try:
+            _ensure_task_retry_columns(snap)
+            snap.commit()
+        except Exception:
+            pass
+        c0 = snap.cursor()
+        now = time.time()
+        # 查找所有到期且未执行的任务（pending 包含初次及重试）
+        c0.execute("SELECT id, participants, topic, chat_context, chat_context_past FROM tasks WHERE status='pending' AND trigger_at <= ?", (now,))
+        due_tasks = c0.fetchall()
+    except Exception as e:
+        print(f"[Scheduler] 快照到期任务失败: {type(e).__name__}:{e}")
+        return
+    finally:
+        try:
+            snap.close()
+        except Exception:
+            pass
+
     if not due_tasks:
-        conn.close()
         return
 
     config = get_config()
-    
+
     for row in due_tasks:
         task_id = row[0]
-        participants = json.loads(row[1])
-        topic = row[2]
-        chat_context = row[3]
-        chat_context_past = row[4]
-        
-        print(f"[Scheduler] 开始执行任务 {task_id}: {participants} -> {topic}")
-        
-        # 1. 生成内容（past 冻结 + now 动态，now 受 autoSyncContext 总开关控制）
-        content = generate_email_content(topic, participants, chat_context_past, chat_context, config)
-
-        # 1.5 检测生成失败（占位/空内容） -> 重试
-        is_fail, reason = _is_failure_content(content, topic)
-        if is_fail:
-            err = f"LLM生成失败:{reason}"
-            print(f"[Scheduler] 任务 {task_id} 内容检测失败 {reason}: {content[:80]}")
-            _handle_task_failure(conn, task_id, err, config)
-            continue
-
-        # 1.6 解析表情标记 → 剥离正文 + 收集附件
-        content, attachments = resolve_stickers(content)
-        attachment_names = [os.path.basename(p) for p in attachments]
-
-        # 2. 发送邮件 (自动根据 emailMethod 配置选择 SMTP 或 Resend) -> 失败则重试
-        ok = send_email(content, topic, participants, config, attachments)
-        if not ok:
-            err = "邮件发送失败(Resend/SMTP)"
-            _handle_task_failure(conn, task_id, err, config)
-            continue
-        
-        # 3. 生成摘要（70-100字），失败静默留空（不影响主流程）
-        sender_name = " & ".join(participants)
-        summary = generate_summary(content, sender_name, config) if content else ""
-
-        # 4. 保存到消息库以供 ST 记忆注入（含主题+参与者+内容+摘要+附件列表）
-        subject = f"来自 {sender_name} 的一封信：{topic}"
-        c.execute(
-            "INSERT INTO messages (subject, content, participants, created_at, synced_to_st, summary, attachments) VALUES (?, ?, ?, ?, 0, ?, ?)",
-            (subject, content, sender_name, time.time(), summary, json.dumps(attachment_names))
-        )
-        
-        # 5. 标记任务完成，并清零重试信息
+        conn = connect_db()
         try:
-            c.execute("UPDATE tasks SET status='completed', retry_count=0, last_error='' WHERE id=?", (task_id,))
-        except Exception:
-            c.execute("UPDATE tasks SET status='completed' WHERE id=?", (task_id,))
-        conn.commit()
-        print(f"[Scheduler] 任务 {task_id} 完成，已入库 messages")
+            _ensure_task_retry_columns(conn)
+            try:
+                participants = json.loads(row[1])
+            except Exception as e:
+                _handle_task_failure(conn, task_id, f"TASK_PARSE:participants非JSON:{e}"[:300], config)
+                continue
+            topic = row[2] or ""
+            chat_context = row[3] or ""
+            chat_context_past = row[4] or ""
 
-    conn.close()
+            print(f"[Scheduler] 开始执行任务 {task_id}: {participants} -> {topic}")
+
+            # 1. 生成内容（past 冻结 + now 动态，now 受 autoSyncContext 总开关控制）
+            content, llm_err = generate_email_content_detailed(topic, participants, chat_context_past, chat_context, config)
+
+            # 1.5 检测生成失败（占位/空内容） -> 重试（last_error 记录精确错误码）
+            is_fail, reason = _is_failure_content(content, topic)
+            if is_fail:
+                err = (llm_err or f"LLM生成失败:{reason}")[:500]
+                print(f"[Scheduler] 任务 {task_id} 内容检测失败 {reason} err={err}: {(content or '')[:80]}")
+                _handle_task_failure(conn, task_id, err, config)
+                continue
+
+            # 1.6 解析表情标记 → 剥离正文 + 收集附件（防误伤：异常也不应堵住任务）
+            try:
+                content, attachments = resolve_stickers(content)
+            except Exception as e:
+                print(f"[Scheduler] 任务 {task_id} 表情解析异常，继续无附件发送: {e}")
+                attachments = []
+            attachment_names = [os.path.basename(p) for p in (attachments or [])]
+
+            # 2. 发送邮件 (自动根据 emailMethod 配置选择 SMTP 或 Resend) -> 失败则重试
+            try:
+                ok = send_email(content, topic, participants, config, attachments)
+            except Exception as e:
+                print(f"[Scheduler] 任务 {task_id} 发信抛异常: {type(e).__name__}:{e}")
+                ok = False
+            if not ok:
+                err = f"邮件发送失败({config.get('emailMethod', 'resend')})"
+                _handle_task_failure(conn, task_id, err, config)
+                continue
+
+            # 3. 生成摘要（70-100字），失败静默留空（不影响主流程）
+            try:
+                sender_name = " & ".join(participants)
+                summary = generate_summary(content, sender_name, config) if content else ""
+            except Exception as e:
+                print(f"[Scheduler] 任务 {task_id} 摘要异常，留空继续: {e}")
+                sender_name = " & ".join(participants) if isinstance(participants, list) else str(participants)
+                summary = ""
+
+            # 4. 保存到消息库以供 ST 记忆注入（含主题+参与者+内容+摘要+附件列表）
+            subject = f"来自 {sender_name} 的一封信：{topic}"
+            conn.cursor().execute(
+                "INSERT INTO messages (subject, content, participants, created_at, synced_to_st, summary, attachments) VALUES (?, ?, ?, ?, 0, ?, ?)",
+                (subject, content, sender_name, time.time(), summary, json.dumps(attachment_names))
+            )
+
+            # 5. 标记任务完成，并清零重试信息
+            try:
+                conn.cursor().execute("UPDATE tasks SET status='completed', retry_count=0, last_error='' WHERE id=?", (task_id,))
+            except Exception:
+                conn.cursor().execute("UPDATE tasks SET status='completed' WHERE id=?", (task_id,))
+            conn.commit()
+            print(f"[Scheduler] 任务 {task_id} 完成，已入库 messages")
+        except Exception as e:
+            # 单任务兜底：任何未预料异常只记这一个任务，绝不 abort 整批
+            try:
+                _handle_task_failure(conn, task_id, f"UNEXPECTED:{type(e).__name__}:{e}"[:500], config)
+            except Exception as e2:
+                print(f"[Scheduler] 任务 {task_id} 失败处理也异常: {e2}")
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 def run_scheduler_loop():
     print("[Scheduler] 调度器线程已启动...")

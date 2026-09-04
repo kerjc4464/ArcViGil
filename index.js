@@ -360,22 +360,67 @@ function setStatus(online) {
 }
 
 // ========== 后端通信 ==========
-async function pushConfigToBackend() {
+function fpOf(v) {
+    const s = String(v || "");
+    if (!s) return { set: false, len: 0, head: "", tail: "" };
+    return { set: true, len: s.length, head: s.slice(0, 4), tail: s.slice(-4) };
+}
+function fpText(fp) {
+    if (!fp || !fp.set) return "未设置";
+    return `${fp.head}…${fp.tail} (${fp.len}位)`;
+}
+async function pushConfigToBackend(silent = false) {
     const url = extension_settings[extensionName].backendUrl;
-    if (!url) return;
+    if (!url) return false;
     try {
         const res = await fetch(`${url}/api/config`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(extension_settings[extensionName]),
         });
-        if (res.ok) toastr.success("ArcViGil: 配置已同步至后端");
-        else toastr.warning("ArcViGil: 后端接收配置失败");
+        if (res.ok) {
+            if (!silent) toastr.success("ArcViGil: 配置已同步至后端");
+            refreshConfigSyncStatus();
+            return true;
+        } else {
+            if (!silent) toastr.warning("ArcViGil: 后端接收配置失败");
+            return false;
+        }
     } catch {
-        toastr.error("ArcViGil: 无法连接到后端，请检查是否已启动");
+        if (!silent) toastr.error("ArcViGil: 无法连接到后端，请检查是否已启动");
+        return false;
     }
 }
 
+// 前后端配置对账：回读后端真实 Key 指纹，与本地输入对比
+async function refreshConfigSyncStatus() {
+    const $badge = $("#arcvigil-config-sync");
+    if (!$badge.length) return;
+    const url = extension_settings[extensionName]?.backendUrl;
+    if (!url) {
+        $badge.removeClass("ok mismatch offline").addClass("unknown").text("未填写后端地址");
+        return;
+    }
+    try {
+        const res = await fetch(`${url}/api/config`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const back = data.secrets?.apiKey;
+        const local = fpOf(extension_settings[extensionName]?.apiKey);
+        if (!back?.set && !local.set) {
+            $badge.removeClass("ok mismatch offline").addClass("unknown").text("前后端均未设置 LLM Key");
+        } else if (back?.set && local.set && back.len === local.len && back.head === local.head && back.tail === local.tail) {
+            $badge.removeClass("mismatch offline unknown").addClass("ok").text(`后端 Key: ${fpText(back)} · 一致 ✓`);
+        } else {
+            $badge.removeClass("ok offline unknown").addClass("mismatch")
+                .text(`本地 ${fpText(local)} / 后端 ${fpText(back)} · 不一致！请点“保存配置到后端”`);
+        }
+    } catch {
+        $badge.removeClass("ok mismatch unknown").addClass("offline").text("后端不可达，对账跳过（重连后自动补推）");
+    }
+}
+
+let lastHeartbeatOnline = null;
 async function sendHeartbeat() {
     if (!extension_settings[extensionName].enable) return;
     try {
@@ -385,9 +430,18 @@ async function sendHeartbeat() {
             body: JSON.stringify({ status: "online", timestamp: Date.now() }),
         });
         setStatus(res.ok);
+        // 重连对账：离线→在线跳变时把本地配置补推一次，修复自动保存 fire-and-forget 的分叉
+        if (res.ok && lastHeartbeatOnline === false) {
+            console.log("[ArcViGil] 后端重连，自动补推配置并对账…");
+            await pushConfigToBackend(true);
+        } else if (res.ok && lastHeartbeatOnline === null) {
+            refreshConfigSyncStatus();
+        }
+        lastHeartbeatOnline = res.ok;
         // 故意不打日志，避免每15秒刷屏控制台
     } catch {
         setStatus(false);
+        lastHeartbeatOnline = false;
         // 连接失败也静默处理，状态指示灯已经变红，无需重复报错
     }
 }
@@ -1214,12 +1268,13 @@ async function updateTaskRadar() {
         heartbeatInterval = setInterval(sendHeartbeat, 15000);
         sendHeartbeat();
 
-        // ---- 初始刷新任务雷达 + Soul列表 + 信件存档 + 表情 ----
+        // ---- 初始刷新任务雷达 + Soul列表 + 信件存档 + 表情 + 配置对账 ----
         setTimeout(() => {
             updateTaskRadar();
             refreshSoulList();
             refreshLetterList();
             refreshStickerList();
+            refreshConfigSyncStatus();
         }, 1500);
 
         console.log("[ArcViGil] 初始化完成 ✓");
