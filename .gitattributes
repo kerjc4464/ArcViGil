@@ -1,0 +1,2 @@
+# 保证 shell 脚本永远是 LF，否则 macOS 的 shebang 会因 \r 炸掉
+ArcViGil-BackEnd/start.sh text eol=lf

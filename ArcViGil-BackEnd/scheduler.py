@@ -6,15 +6,17 @@ import re
 import string
 import base64
 import mimetypes
+import uuid
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 import requests
 
-DB_PATH = "database.db"
-SOULS_DIR = "souls"
-STICKERS_DIR = "stickers"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "database.db")
+SOULS_DIR = os.path.join(BASE_DIR, "souls")
+STICKERS_DIR = os.path.join(BASE_DIR, "stickers")
 MAX_STICKERS_PER_EMAIL = 10  # 每封邮件表情附件软上限（邮箱服务商普遍有附件体积限制）
 
 os.makedirs(STICKERS_DIR, exist_ok=True)
@@ -275,6 +277,58 @@ def _get_int(config, key, default, min_v=None, max_v=None):
     except Exception:
         return default
 
+def _get_or_create_backend_session_id():
+    """后端常驻会话 ID：存 config.opencodeSessionId，首次生成 uuid4 后复用。
+
+    背景：2026-09-06 起 opencode.ai/zen/go 强制要求 x-opencode-session，
+    缺失直接 HTTP 400 MissingSessionID。单机固定一个 ID 即可过校验；
+    有 task_id 的调用方会用 arcvigil-task-{id} 以获得更好的缓存亲和。
+    """
+    try:
+        conn = connect_db()
+        try:
+            c = conn.cursor()
+            c.execute("SELECT value FROM config WHERE key='opencodeSessionId'")
+            row = c.fetchone()
+            if row and row[0]:
+                return str(row[0])
+            sid = f"arcvigil-{uuid.uuid4().hex[:12]}"
+            c.execute("INSERT OR REPLACE INTO config (key, value) VALUES ('opencodeSessionId', ?)", (sid,))
+            conn.commit()
+            return sid
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception:
+        return "arcvigil-backend"
+
+def _llm_headers(api_key, api_url, config=None, session_id=None):
+    """组装 LLM 请求头：OpenCode Go/Zen 自动带 x-opencode-session。
+
+    只对 opencode.ai 域名加头，OpenAI 官端 / Ollama / 本地模型不受影响。
+    session_id 优先用调用方传入（如 arcvigil-task-{id}，重试保持不变），
+    否则用后端常驻 opencodeSessionId。
+    """
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    try:
+        if api_url and "opencode.ai" in str(api_url):
+            sid = session_id
+            if not sid:
+                try:
+                    sid = (config or {}).get("opencodeSessionId") or _get_or_create_backend_session_id()
+                except Exception:
+                    sid = "arcvigil-backend"
+            headers["x-opencode-session"] = str(sid)
+            headers["x-opencode-client"] = "ArcViGil"
+    except Exception:
+        pass
+    return headers
+
 def _is_failure_content(content, topic=""):
     """判断是否为占位失败内容：空、或包含‘虚空中’/‘系统异常’"""
     if not content or not content.strip():
@@ -338,12 +392,13 @@ def _placeholder(topic):
     return f"(由于系统异常，这封关于 {topic} 的信件丢失在了虚空中...)"
 
 
-def generate_email_content_detailed(topic, participants, chat_context_past, chat_context_now, config):
+def generate_email_content_detailed(topic, participants, chat_context_past, chat_context_now, config, session_id=None):
     """带精确错误码的生成函数，返回 (content, error)。
 
     error 为空字符串表示成功；失败时 content 为占位文本或空串，
     error 形如 LLM_HTTP401 / LLM_TIMEOUT_300s / LLM_CONN / LLM_EMPTY /
     TEMPLATE_FORMAT / PARAM_INVALID / UNEXPECTED，一眼可区分 key 问题与模型问题。
+    session_id 用于 OpenCode Go 的 x-opencode-session（同 task 重试保持不变）。
     """
     api_url = normalize_api_base(config.get("apiUrl", "https://api.openai.com/v1") or "https://api.openai.com/v1")
     api_key = config.get("apiKey", "")
@@ -384,10 +439,7 @@ def generate_email_content_detailed(topic, participants, chat_context_past, chat
     if "{stickers}" not in prompt_template and stickers_block:
         system_prompt += "\n\n" + stickers_block
 
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+    headers = _llm_headers(api_key, api_url, config, session_id)
 
     # 组装生成参数，从 config 读取，提供合理默认值
     try:
@@ -443,9 +495,9 @@ def generate_email_content_detailed(topic, participants, chat_context_past, chat
     return (str(content).strip(), "")
 
 
-def generate_email_content(topic, participants, chat_context_past, chat_context_now, config):
+def generate_email_content(topic, participants, chat_context_past, chat_context_now, config, session_id=None):
     """独立调用大模型生成信件内容（兼容 wrapper，精确错误请用 detailed 版）"""
-    content, _ = generate_email_content_detailed(topic, participants, chat_context_past, chat_context_now, config)
+    content, _ = generate_email_content_detailed(topic, participants, chat_context_past, chat_context_now, config, session_id=session_id)
     if not content:
         return _placeholder(topic)
     return content
@@ -458,7 +510,7 @@ DEFAULT_SUMMARY_PROMPT = """请用70到100字概括以下邮件内容，保留�
 邮件正文：
 {content}"""
 
-def generate_summary(content, participants_str, config):
+def generate_summary(content, participants_str, config, session_id=None):
     """生成邮件摘要（70-100字）。摘要LLM可独立配置或复用主LLM。"""
     if config.get("summaryEnabled", "true") != "true":
         return ""
@@ -483,10 +535,7 @@ def generate_summary(content, participants_str, config):
     temperature = float(config.get("summaryTemperature", 0.5))
     max_tokens  = int(config.get("summaryMaxTokens", 200))
 
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+    headers = _llm_headers(api_key, api_url, config, session_id)
     payload = {
         "model": api_model,
         "messages": [{"role": "user", "content": system_prompt}],
@@ -826,8 +875,10 @@ def process_due_tasks():
 
             print(f"[Scheduler] 开始执行任务 {task_id}: {participants} -> {topic}")
 
+            # 同 task 重试保持同一 session，保证 Go 侧缓存亲和 + 过 400 校验
+            _sid = f"arcvigil-task-{task_id}"
             # 1. 生成内容（past 冻结 + now 动态，now 受 autoSyncContext 总开关控制）
-            content, llm_err = generate_email_content_detailed(topic, participants, chat_context_past, chat_context, config)
+            content, llm_err = generate_email_content_detailed(topic, participants, chat_context_past, chat_context, config, session_id=_sid)
 
             # 1.5 检测生成失败（占位/空内容） -> 重试（last_error 记录精确错误码）
             is_fail, reason = _is_failure_content(content, topic)
@@ -859,7 +910,7 @@ def process_due_tasks():
             # 3. 生成摘要（70-100字），失败静默留空（不影响主流程）
             try:
                 sender_name = " & ".join(participants)
-                summary = generate_summary(content, sender_name, config) if content else ""
+                summary = generate_summary(content, sender_name, config, session_id=_sid) if content else ""
             except Exception as e:
                 print(f"[Scheduler] 任务 {task_id} 摘要异常，留空继续: {e}")
                 sender_name = " & ".join(participants) if isinstance(participants, list) else str(participants)

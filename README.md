@@ -41,7 +41,15 @@ https://github.com/kerjc4464/ArcViGil
 点确定，ST 会自动克隆到 `third-party/` 目录。安装后刷新页面，在扩展列表中启用 ArcViGil。
 
 ### 2. 启动后端
-进入 `ArcViGil` 文件夹下的 `ArcViGil-BackEnd/`，**双击 `start.bat`**。
+进入 `ArcViGil` 文件夹下的 `ArcViGil-BackEnd/`：
+
+- **Windows**：**双击 `start.bat`**。
+- **macOS / Linux**：先去 [python.org](https://www.python.org/downloads/) 装 Python 3.13（3.10+ 即可），然后在终端里运行：
+  ```
+  cd ArcViGil-BackEnd
+  chmod +x start.sh && ./start.sh
+  ```
+  脚本会自动建 `.venv` 虚拟环境并安装依赖。
 
 脚本会自动做两件事：①安装 Python 依赖 ②启动后端服务。
 看到 `[ArcViGil] Backend and Scheduler started.` 就成功了，**黑框不要关**。

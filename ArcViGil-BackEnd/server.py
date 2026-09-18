@@ -25,9 +25,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DB_PATH = "database.db"
-SOULS_DIR = "souls"
-STICKERS_DIR = "stickers"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "database.db")
+SOULS_DIR = os.path.join(BASE_DIR, "souls")
+STICKERS_DIR = os.path.join(BASE_DIR, "stickers")
 
 def db():
     """统一建连：busy 超时 + WAL，避免调度器与 API 并发时 'database is locked'。"""
@@ -206,7 +207,8 @@ async def schedule_tasks(request: Request):
         if should_use_resend:
             # 立刻生成内容（autoSync已禁用，now_block为空）
             try:
-                content, _gen_err = scheduler.generate_email_content_detailed(topic, participants_raw, chat_context, "", config)
+                _sched_sid = f"arcvigil-sched-{int(now)}-{abs(hash(topic)) % 10000}"
+                content, _gen_err = scheduler.generate_email_content_detailed(topic, participants_raw, chat_context, "", config, session_id=_sched_sid)
                 if _gen_err:
                     print(f"[Schedule] 生成内容告警 {_gen_err}: {topic}")
             except Exception as e:
@@ -233,7 +235,7 @@ async def schedule_tasks(request: Request):
             # 摘要
             try:
                 sender_name_tmp = " & ".join(participants_raw) if participants_raw else "System"
-                summary = scheduler.generate_summary(content, sender_name_tmp, config) if content else ""
+                summary = scheduler.generate_summary(content, sender_name_tmp, config, session_id=_sched_sid) if content else ""
             except Exception as e:
                 print(f"[Schedule] 生成摘要异常 {e}")
                 summary = ""
@@ -646,7 +648,11 @@ async def test_llm(request: Request):
     api_base = scheduler.normalize_api_base(raw_url)
     endpoint = f"{api_base}/chat/completions"
 
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    try:
+        _sid = scheduler._get_or_create_backend_session_id()
+    except Exception:
+        _sid = "arcvigil-test"
+    headers = scheduler._llm_headers(api_key, api_base, {"opencodeSessionId": _sid}, session_id=f"arcvigil-test-{_sid}")
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": "Hi, reply with just one word: OK"}],
@@ -697,7 +703,7 @@ async def test_task(task_id: int):
     config = scheduler.get_config()
 
     # 生成内容
-    content, _gen_err = scheduler.generate_email_content_detailed(topic, participants, chat_context_past, chat_context, config)
+    content, _gen_err = scheduler.generate_email_content_detailed(topic, participants, chat_context_past, chat_context, config, session_id=f"arcvigil-task-{task_id}-test")
     if _gen_err:
         print(f"[Test] 生成告警 {_gen_err} task={task_id}")
 

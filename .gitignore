@@ -8,4 +8,5 @@
 *.sqlite-journal
 __pycache__/
 *.pyc
+ArcViGil-BackEnd/.venv/
 ArcViGil-BackEnd/souls/
